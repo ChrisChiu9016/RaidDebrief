@@ -1,0 +1,12 @@
+{
+  "Author": "Raid Debrief contributors",
+  "Name": "Raid Debrief",
+  "Punchline": "快速確認最近一次高難度戰鬥發生了什麼。",
+  "Description": "Raid Debrief 的 Dalamud 載入測試版本。使用 /rdebrief 開啟測試視窗。",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "raid",
+    "replay",
+    "testing"
+  ]
+}

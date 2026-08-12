@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RaidDebrief.Core\RaidDebrief.Core.csproj" />
+    <ProjectReference Include="..\RaidDebrief.UI\RaidDebrief.UI.csproj" />
+  </ItemGroup>
+</Project>

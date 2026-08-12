@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <AssemblyName>RaidDebrief</AssemblyName>
+    <RootNamespace>RaidDebrief.Plugin</RootNamespace>
+    <Version>0.1.0.0</Version>
+    <PackageProjectUrl>https://github.com/RaidDebrief/RaidDebrief</PackageProjectUrl>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RaidDebrief.Core\RaidDebrief.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\JobIcons\*.png">
+      <LogicalName>RaidDebrief.JobIcons.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\TargetCircle.png">
+      <LogicalName>RaidDebrief.TargetCircle.png</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\TargetRing.png">
+      <LogicalName>RaidDebrief.TargetRing.png</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\Target Markers\*.png">
+      <LogicalName>RaidDebrief.TargetMarkers.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="RaidDebrief.Plugin.Tests" />
+  </ItemGroup>
+</Project>

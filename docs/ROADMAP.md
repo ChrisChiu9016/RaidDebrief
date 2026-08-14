@@ -100,7 +100,7 @@ MVP success condition:
 > After a wipe, the player can identify the first death and open a useful replay window within a few seconds.
 
 ## Phase 5 — Replay UX
-Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Fresh visual acceptance plus inspection of that Pull's Barrier／Action-name／Actor output remain required.
+Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Current-build manual Replay checks also passed for DRK and GNB invulnerability statuses. Full visual acceptance plus inspection of that Pull's Barrier／Action-name／Actor output remain required.
 
 Implemented:
 - Fixed three-column hierarchy: compact Pull／Party, Boss＋Arena, and Actor／Death context

@@ -276,6 +276,11 @@ Historical entries are preserved even when the architecture later changed. In pa
 - The fresh `Debug -p:Platform=x64 --no-incremental` build completed successfully. The authoritative DLL is `src/RaidDebrief.Plugin/bin/x64/Debug/RaidDebrief.dll`, 998,912 bytes, `LastWriteTime` 2026-08-14 22:16:33.3553004 +08:00, SHA-256 `c6ffa06c57bb89fd2d1db4182bb98f680db236dbad2398b6ac42fd554daeda51`. Dalamud configuration points to that exact path; unload began at 22:16:33.933, reload began at 22:16:33.963, and Plugin load completed at 22:16:34.266 after the DLL timestamp.
 - Source audit confirmed `RaidDebrief.Core.csproj` has no external／project reference and the Core tree contains no Dalamud or Lumina reference. Scope audit found no persistent Pull history, compare, DPS／rotation analysis, blame, mechanic guidance, or session analytics.
 
+### Current-build manual in-game evidence
+
+- User-reported manual Replay verification on 2026-08-14 confirmed the DRK and GNB invulnerability-status tests passed. This accepts current-build recognition and presentation of those two tank invulnerability cases. It does not by itself accept duration fallback, stack rendering, Barrier amount, other Job statuses, or the complete Replay visual surface.
+
+
 ### Remaining current-build acceptance
 
 - Post-reload automatic Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` started at 22:19:30.835 in Territory 1363／Map 79, finalized after `DutyWiped` at 22:33:24.844 with 8,341 frames, 14,156 events, and 6,262 Action Effects, and completed validation at 22:33:24.890. Runtime Replay loaded that exact CaptureId at 22:36:01.728 with the same 8,341 frames and 14,156 events, proving current-build finalization, publication, and in-memory handoff without JSON. Barrier values, Action-name snapshots, exact sampling metrics, and Actor completeness have not yet been inspected.

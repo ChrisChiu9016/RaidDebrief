@@ -280,6 +280,9 @@ Historical entries are preserved even when the architecture later changed. In pa
 
 - User-reported manual Replay verification on 2026-08-14 confirmed the DRK and GNB invulnerability-status tests passed. This accepts current-build recognition and presentation of those two tank invulnerability cases. It does not by itself accept duration fallback, stack rendering, Barrier amount, other Job statuses, or the complete Replay visual surface.
 
+- User-identified Developer／Test export `2b696060-c7d1-4a50-9074-4775ce2f9767` (SHA-256 `9d0fc0db200658e1a49761192a45cb673686339aaae9389ef06c025c3c51cb29`) was captured from 20:53:08 to 20:57:06 ＋08:00, before the accepted x64 Debug DLL was built at 22:16:33. It therefore does not close current-build acceptance. Current Offline verification nevertheless loaded and replayed all 2,373 frames, 3,860 events, 1,810 Action Effects, and 69 Actors; 20,000 deterministic seeks averaged 0.0200 ms with 0 bytes allocated per seek.
+- Direct inspection of that pre-final-build export found eight Party Actors present in every Frame with no duplicate StableActorId, strictly increasing timestamps averaging 100.001 ms apart, and nonzero recorded Barrier values for every Party member. Its 27 Action-name snapshots are sorted, unique, readable Japanese StaticExcel names with no RSV／numeric／blank values; they cover 27 of 28 unique CastStarted Action IDs, leaving Boss ActionId `50516` at 174,801 ms unresolved. These are useful supplemental data-contract results, not evidence for the later accepted DLL.
+
 
 ### Remaining current-build acceptance
 

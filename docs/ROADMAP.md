@@ -100,14 +100,14 @@ MVP success condition:
 > After a wipe, the player can identify the first death and open a useful replay window within a few seconds.
 
 ## Phase 5 — Replay UX
-Status: Whole-interface redesign implemented with automated verification on 2026-08-12; fresh in-game visual acceptance remains required.
+Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Fresh visual acceptance plus inspection of that Pull's Barrier／Action-name／Actor output remain required.
 
 Implemented:
 - Fixed three-column hierarchy: compact Pull／Party, Boss＋Arena, and Actor／Death context
 - Boss HP and recorded CurrentCastTime／TotalCastTime playback
 - Job-only Party and Arena labels with selected-player focus and zoomed camera follow
 - Bottom-only playback controls, speed, one Death-only Timeline, marker hover, and complete Quick Jump
-- Timestamp HP／alive snapshot and active mitigation remaining time
+- Timestamp HP／alive snapshot with the Party-style Job icon, HP values, percentage, and health／barrier bars; a compact native-icon grid shows recorded remaining time and stack counts for selected-player defensive buffs, barriers, and recovery support plus main-Boss Reprisal／Feint／Addle／Dismantle damage-down debuffs
 - Honest Death event correlation with virtual HP, Last Hits, estimated Overkill, confidence, evidence, and limitations
 - Recorded party membership plus legacy player-Actor fallback
 - Runtime and manual JSON source controls collapsed under an advanced development section
@@ -117,6 +117,14 @@ Deliberately absent from the formal surface:
 - Recent-event feed, DPS／HPS, rankings, mitigation scoring, blame, strategy, or recommended action
 
 ## Phase 6 — Stability
+Status: Capture performance hardening is implemented and automated. The single-owner 10 Hz scheduler, two-stage Framework scan, immediate first sample, gap accounting, closed-Probe no-scan path, per-slot Actor-name cache, single-access StatusList scan, and lazy diagnostics are in place. Current build `66043fb5-d46b-48ba-9048-a25f53190b2a` completed and validated after 8,341 frames, 14,156 events, and 6,262 Action Effects; output inspection and comparative frame-time／allocation／GC profiling remain pending, so no “zero stutter” causality claim is accepted.
+
+Implemented hardening:
+- Lightweight combat／duty lifecycle observation remains per Framework update.
+- Full Party／ObjectTable／StatusList extraction occurs only for a Capture sample or an in-duty open Probe's 10 Hz refresh.
+- Late callbacks record one real sample and report gaps rather than backfilling duplicate frames.
+- Per-Actor volatile read failures are isolated and counted.
+
 Test:
 - Long fights
 - 8 simultaneous deaths
@@ -131,12 +139,13 @@ Test:
 - Game patch/API changes
 
 ## Extra Goal — Event Correlation
-Status: First narrow correlation implemented for the immediate pre-death window.
+Status: Observation-anchored algorithm v2 is implemented and automated／offline regression verified. Current-build in-game Death evidence, especially a death with a recorded barrier and reliable Action-name snapshot, remains pending.
 
 Implemented:
-- Reconstruct target-resolved incoming Damage／Heal from recorded Action Effects and HP anchors
+- Reconstruct target-resolved incoming Damage／Heal from the last living HP observation and an ordered Action Effect suffix, without assuming sampled HP content is synchronous with callback timestamps
+- Calibrate a bounded Pull-local HP observation-lag window from clean single-effect HP transitions, with a conservative fallback for sparse evidence
 - Preserve Last Hits and identify the virtual-HP crossing entry as a Killing Blow candidate
-- Show estimated HP-before-hit／Overkill with High／Medium／Low／Unavailable confidence
+- Show estimated HP-before-hit／effective pool／Overkill with High／Medium／Low／Unavailable confidence; barrier uncertainty and excessive observation lag cannot remain High
 - Preserve evidence, limitations, and algorithm version; never present the result as a server-authored fact
 
 Deferred:

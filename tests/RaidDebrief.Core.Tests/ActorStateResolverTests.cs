@@ -14,10 +14,10 @@ public sealed class ActorStateResolverTests
             [
                 CreateFrame(
                     1_000,
-                    CreateSample(1, x: 0, rotationDegrees: 350, hp: 100, dead: false, targetable: true, hitboxRadius: 1)),
+                    CreateSample(1, x: 0, rotationDegrees: 350, hp: 100, barrierPercentage: 25, dead: false, targetable: true, hitboxRadius: 1)),
                 CreateFrame(
                     1_100,
-                    CreateSample(1, x: 10, rotationDegrees: 10, hp: 0, dead: true, targetable: false, hitboxRadius: 2)),
+                    CreateSample(1, x: 10, rotationDegrees: 10, hp: 0, barrierPercentage: 0, dead: true, targetable: false, hitboxRadius: 2)),
             ]);
         var resolver = new ActorStateResolver(record);
 
@@ -31,6 +31,7 @@ public sealed class ActorStateResolverTests
         Assert.Equal(1, state.HitboxRadius);
         Assert.Equal(100u, state.CurrentHp);
         Assert.Equal(100u, state.MaxHp);
+        Assert.Equal((byte)25, state.BarrierPercentage);
         Assert.False(state.IsDead);
         Assert.True(state.IsTargetable);
     }
@@ -188,6 +189,7 @@ public sealed class ActorStateResolverTests
         float x = 0,
         float rotationDegrees = 0,
         uint hp = 100,
+        byte barrierPercentage = 0,
         bool dead = false,
         bool targetable = true,
         float hitboxRadius = 0,
@@ -202,6 +204,7 @@ public sealed class ActorStateResolverTests
             HitboxRadius = hitboxRadius,
             CurrentHp = hp,
             MaxHp = 100,
+            BarrierPercentage = barrierPercentage,
             IsDead = dead,
             IsTargetable = targetable,
             IsOmnidirectional = omnidirectional,

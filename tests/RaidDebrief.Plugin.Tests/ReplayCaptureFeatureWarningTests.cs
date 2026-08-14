@@ -63,6 +63,17 @@ public sealed class ReplayCaptureFeatureWarningTests
         Assert.Contains("身位無效", warning, StringComparison.Ordinal);
         Assert.Contains("BNpcBase 靜態判定", warning, StringComparison.Ordinal);
     }
+    [Fact]
+    public void LegacyCaptureWarnsThatRecordedActionNamesAreUnavailable()
+    {
+        var warning = Assert.IsType<string>(
+            ReplayWindow.BuildCaptureFeatureWarning(
+                CreateRecord(CaptureFeatures.ReplayPresentation & ~CaptureFeatures.ActionNameSnapshot)));
+
+        Assert.Contains("Recorded Action names", warning, StringComparison.Ordinal);
+        Assert.Contains("Action #ID", warning, StringComparison.Ordinal);
+    }
+
 
     private static PullRecord CreateRecord(CaptureFeatures features) =>
         new()

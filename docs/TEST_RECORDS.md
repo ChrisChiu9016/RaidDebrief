@@ -1,6 +1,6 @@
 # Raid Debrief — Test Records
 
-Last updated: 2026-08-10
+Last updated: 2026-08-14
 
 ## Purpose
 
@@ -218,7 +218,7 @@ Historical entries are preserved even when the architecture later changed. In pa
 ### Phase 3 Final Closeout
 
 - The Wipe prompt controller now retains every newly validated `DutyWiped` generation that completes before `InCombat` clears, then offers that exact Pull once on the first out-of-combat UI update. The persisted, default-enabled prompt setting clears queued／visible prompts when disabled and never backfills Wipes completed while disabled.
-- The persisted, default-enabled combat auto-close setting preserves the accepted pause／cancel／close behavior. Explicit opt-out keeps an existing Replay window visible in combat while still pausing the session, canceling pending load work, denying new opens, and preventing frame advance; re-enabling it during combat closes the window on the next UI update.
+- Historical Phase 3 contract, superseded by the 2026-08-14 entry-edge rule below: the persisted, default-enabled combat auto-close setting preserved pause／cancel／close behavior; explicit opt-out kept an existing Replay window visible and paused; re-enabling during combat previously closed it on the next UI update.
 - Final Phase 3 verification passed Core 78／UI 4／Plugin 91 tests with 0 failures; focused combat gate／frame policy／settings coverage passed 23 tests and retained 0-byte policy allocation. The fresh x64 Debug solution build completed with 0 warnings／0 errors. The configured 914,432-byte DLL had `LastWriteTime` 2026-08-11 22:42:25.9193460 +08:00 and SHA-256 `2cc98efb2cdb7ff621157e213ea2ecf825d15b7c2efc683440b52bfab1b7d1dc`; Dalamud logged unload at 22:42:26.439, load at 22:42:26.459, and successful Plugin completion at 22:42:26.714 with no RaidDebrief UI error.
 - Scope closeout: Runtime still retains only the active Pull and latest successful in-memory completed Pull. Phase 3 added no persistent history／recent／retention／compare, cross-session restore, Debrief analysis, mechanic inference, blame, session statistics, or Core dependency on Dalamud. The complete working-progress snapshot is archived at `docs/archive/progress-phase-3-2026-08-11.md`.
 
@@ -233,6 +233,9 @@ Historical entries are preserved even when the architecture later changed. In pa
 - Final automated verification passed Core 84／UI 4／Plugin 93 tests with 0 failures; focused Phase 4 verification passed Core 6 and Plugin 20 tests. Formatting verification passed. The main recorded fixture still rendered 2,234 scenes, advanced 2,233 frames, and completed 20,000 deterministic seeks at 0.02629414 ms average／0 bytes per seek.
 - Direct analysis of real `DutyWiped` Capture `c1a72067-1783-4fd3-9c9c-5dc97f71ed1d` produced duration 131,883 ms, Wipe 120,679 ms, Boss ケフカ at 16,531,144／44,109,275 HP (37.4777%), eight ordered Player deaths, zero unresolved deaths, and suggested range 104,706..120,679 ms. This Capture has no Raise／re-death, so it is evidence for real multi-death／Boss-HP analysis but does not satisfy final Phase 4 in-game acceptance by itself.
 - The fresh `Debug -p:Platform=x64 --no-incremental` build completed with 0 warnings／0 errors. The configured Dev Plugin path targets `src/RaidDebrief.Plugin/bin/x64/Debug/RaidDebrief.dll`; the 923,648-byte DLL has `LastWriteTime` 2026-08-11 23:31:07.7899372 +08:00 and SHA-256 `89928c1b3239d11d88e0fc5fbfb158ed18085c97f7ba53d8a49781b9db8bb378`. Dalamud logged unload at 23:31:08.310, load at 23:31:08.370, and successful Replay／Debrief window completion at 23:31:08.938 with no RaidDebrief UI error.
+- Death correlation algorithm v2 removes the false content-synchrony assumption between Action Effect callback timestamps and ObjectTable HP samples. It anchors on the last living sample, chooses the latest ordered effect suffix that crosses zero, includes effects observed before that sample timestamp, calibrates a bounded Pull-local lag threshold from unique exact player HP transitions, and blocks High confidence for barrier absorption or excessive observation lag. Two focused delayed-HP regressions pass; full automated verification passed Core 99／UI 4／Plugin 138 with 0 failures.
+- The x64 Debug solution build succeeded and refreshed `src/RaidDebrief.Plugin/bin/x64/Debug/RaidDebrief.dll`. Canonical fixture `20260810_DMU.json` loaded and rendered 5,885 SVG scenes, advanced all 5,884 frames, and completed 20,000 deterministic seeks at 0.02660664 ms average／0 bytes per seek.
+
 
 ### Remaining Final Acceptance
 
@@ -243,7 +246,7 @@ Historical entries are preserved even when the architecture later changed. In pa
 ### Current Functional Surface
 
 - The formal Replay UI now exposes playback／scrubbing, a complete recorded Player Death list, selected-player Focus, and the arena. A death button seeks to the exact recorded timestamp and pauses.
-- Colored Timeline event markers, recent events, Active recorded statuses, timestamp HP／status detail, and cast／status／raise／Wipe jump categories were removed. Runtime and manual JSON controls are collapsed under the advanced development section.
+- Historical Phase 5 surface, superseded by the 2026-08-14 redesign below: colored Timeline markers, recent events, active-status and timestamp-vitals detail, and non-Death jump categories had been removed. Runtime and manual JSON controls remained collapsed under the advanced development section.
 - Focus changes opacity only. Above the Map-derived minimum zoom, the camera follows the visible selected player within the established safe pan boundary; temporary absence retains the last center and manual arena dragging cancels Focus.
 
 ### Verification
@@ -252,6 +255,35 @@ Historical entries are preserved even when the architecture later changed. In pa
 - The main synthetic fixture loaded and rendered 2,234 scenes, advanced 2,233 frames, and completed 20,000 deterministic seeks at 0.0196602 ms average／0 bytes per seek.
 - The fresh `Debug -p:Platform=x64 --no-incremental` build completed with 0 warnings／0 errors. The configured 925,696-byte DLL had `LastWriteTime` 2026-08-12 00:31:56.0001492 +08:00 and SHA-256 `2753d7aae786334d1a2656abd1dbb3879dfbdef12b3bd83526eea457eb3ebb00`; Dalamud logged unload at 00:31:56.615, load at 00:31:56.643, and successful window load at 00:31:56.925.
 - In-game verification confirmed the implemented behavior is normal. The current compact presentation is accepted for this scope; overall layout and HP presentation are deferred to a separate whole-interface redesign.
+
+## 2026-08-14 Capture and Replay Technical Refresh
+
+### Implemented contract
+
+- Capture now uses a two-stage Framework contract: `BeginFrameworkUpdate` advances lifecycle and prepares the active Pull's single 100 ms sample; `LiveDataProbe` scans Party／ObjectTable／StatusList only when Capture or an in-duty open Probe requires it; `SubmitFrameworkSample` commits that managed snapshot. Pull start samples in the same callback, late callbacks record one real sample plus gaps, cancellation does not advance cadence, and overlapping preparations are rejected.
+- The open Developer Probe refreshes at 10 Hz outside recording only while in a duty instance. Closed Probe＋idle Capture performs no full scan. A Capture-owned sample and Probe demand share one scan. StatusList is obtained once per Actor scan, Actor names are cached by ObjectTable slot＋GameObjectId, volatile Actor failures are isolated and counted, and Event／Action Effect diagnostic strings are formatted lazily.
+- Current Captures record `BarrierPercentage` under `CaptureFeatures.BarrierState` and one sorted Pull-local `RecordedActionName` per resolved observed Cast Action ID under `ActionNameSnapshot`. Resolution priority is resolved localized Action sheet, Client RSV, then entity-matched enemy CastBar; unresolved names retry at bounded 500 ms intervals and produce no snapshot if all attempts fail. Replay prefers the recorded name and legacy JSON remains load-compatible.
+- Replay now presents role-ordered Party rows with Job icon, timestamp HP values／percentage, dead state, health bar, and a left-anchored barrier overlay; the context shows Actor vitality, barrier availability, recorded defensive／barrier／invulnerability effects, optional HoT effects, active-Boss damage-down debuffs, native icons, remaining time, and stacks. Targetable enemy HUD groups show HP percentage and a conditional recorded Cast row. Timeline and Quick Jump remain player-Death-only.
+- Combat auto-close is an entry-edge action. Auto-close enabled hides and pauses active Replay on combat entry; disabled keeps it visible but paused. Changing the setting after combat has begun does not synthesize a second entry action. Explicit opens remain rejected throughout combat.
+- Death correlation algorithm v2 anchors on the last living HP observation, admits effects whose callback timestamp precedes that sample, selects the latest ordered suffix crossing zero, calibrates a bounded Pull-local observation-lag threshold, and includes recorded barrier state in the estimated effective pool. Barrier accounting and excessive lag remain explicit confidence limitations.
+
+### Automated and offline evidence
+
+- Fresh individual project runs passed `RaidDebrief.Core.Tests` 99／99, `RaidDebrief.UI.Tests` 4／4, and `RaidDebrief.Plugin.Tests` 169／169 with 0 failures. Focused synthetic `ReplayEndToEndTests` passed 2／2. `dotnet format RaidDebrief.sln --verify-no-changes --no-restore` passed, and `git diff --check` reported no whitespace errors.
+- `testdata/recorded/20260810_DMU.json` rendered 5,885 scenes, advanced all 5,884 frames, and completed 20,000 deterministic seeks at 0.02354187 ms average and 0 bytes per seek.
+- `testdata/recorded/6fe1b80f-567a-41a3-8912-6d013c137aa7.json` rendered 2,234 scenes, advanced all 2,233 frames, and completed 20,000 deterministic seeks at 0.017818665 ms average and 0 bytes per seek.
+- `testdata/recorded/P10S.json` rendered 379 scenes, advanced all 378 frames, and completed 20,000 deterministic seeks at 0.01292965 ms average and 0 bytes per seek.
+- The fresh `Debug -p:Platform=x64 --no-incremental` build completed successfully. The authoritative DLL is `src/RaidDebrief.Plugin/bin/x64/Debug/RaidDebrief.dll`, 998,912 bytes, `LastWriteTime` 2026-08-14 22:16:33.3553004 +08:00, SHA-256 `c6ffa06c57bb89fd2d1db4182bb98f680db236dbad2398b6ac42fd554daeda51`. Dalamud configuration points to that exact path; unload began at 22:16:33.933, reload began at 22:16:33.963, and Plugin load completed at 22:16:34.266 after the DLL timestamp.
+- Source audit confirmed `RaidDebrief.Core.csproj` has no external／project reference and the Core tree contains no Dalamud or Lumina reference. Scope audit found no persistent Pull history, compare, DPS／rotation analysis, blame, mechanic guidance, or session analytics.
+
+### Remaining current-build acceptance
+
+- Post-reload automatic Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` started at 22:19:30.835 in Territory 1363／Map 79, finalized after `DutyWiped` at 22:33:24.844 with 8,341 frames, 14,156 events, and 6,262 Action Effects, and completed validation at 22:33:24.890. Runtime Replay loaded that exact CaptureId at 22:36:01.728 with the same 8,341 frames and 14,156 events, proving current-build finalization, publication, and in-memory handoff without JSON. Barrier values, Action-name snapshots, exact sampling metrics, and Actor completeness have not yet been inspected.
+- Existing Replay／Probe screenshots were captured before the accepted DLL build. They are visual development evidence only, not fresh current-build visual acceptance.
+- The current-build Pull isolated one volatile ObjectTable Actor `NullReferenceException` at slot 15 and continued to successful finalization; a pre-final-build Pull similarly isolated one slot 71 failure. The per-Actor containment path is observed, but Actor continuity still requires output inspection.
+- Comparative in-game callback allocation, GC, and frame-time profiling has not been recorded. The code removes known high-frequency work, but no “zero stutter” causal or completion claim is accepted.
+- Phase 4 still requires the documented real `DutyWiped` scenario with multiple player deaths, resolvable Boss HP, and a raise followed by repeated death, followed by exact Summary → suggested-start Replay and next-Pull non-interference. Phase 5 still requires fresh current-build visual acceptance.
+
 
 ## Original Development Record
 

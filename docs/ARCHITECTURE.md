@@ -66,11 +66,11 @@ testdata/
 Responsibilities:
 - Detect pull start/end.
 - Track party/boss actors.
-- Sample positions and rotation.
-- Capture HP/state snapshots.
-- Capture observable combat events.
+- Sample positions, rotation, HP, barrier percentage, cast state, statuses, and actor lifecycle at the recording cadence.
+- Capture observable combat events and event-driven Action Effects.
+- Snapshot one Pull-local name for each observed Cast Action ID when a reliable name source is available.
 - Capture Waymarks and the 17 current Target Marker slots.
-- Convert Dalamud/game objects into Core domain records.
+- Convert Dalamud/game objects into Core domain records without retaining live game references.
 
 Capture must not perform replay rendering or wipe-cause analysis.
 
@@ -101,6 +101,17 @@ Idle
 - Replay reads `GetReplaySourceSnapshot()`, which returns finalization generation／state／CaptureId／error, completed generation, and the `LastCompletedPull` reference under the same lock. Consumers must not combine separately timed status and record reads.
 - Plugin disposal unsubscribes callbacks and releases runtime state. Startup or reload begins a new runtime session and does not restore combat state from disk.
 - Manual capture is unrestricted Developer/Test infrastructure. It remains an explicit alternative and never shares an active record with automatic mode; production instance gating must not change its behavior.
+
+### Framework Sampling Pipeline
+
+- `LiveDataProbe` reads lightweight client, combat, duty, territory, Map, and instance state on every `Framework.Update`; lifecycle edges and instance exit therefore remain frame-responsive.
+- `CaptureService.BeginFrameworkUpdate` advances the automatic lifecycle first and returns a prepared `FrameworkCaptureSample` only when the active Pull's single `CaptureSamplingScheduler` requires a real sample. Pull start produces the first sample in the same Framework callback.
+- `FrameworkScanCoordinator` performs at most one Party／ObjectTable／StatusList scan for that callback. A Capture sample owns the scan while recording; outside recording, an open Probe in a duty instance may request its own 10 Hz refresh; a closed Probe with no active Capture performs no full scan.
+- `SubmitFrameworkSample` commits the prepared sample and synchronously copies managed Actor／Party state into the active Pull. Failure calls `CancelFrameworkSample`, which does not advance cadence or the gap baseline. A pending sample cannot overlap another update.
+- The scheduler uses monotonic elapsed milliseconds and an absolute 100 ms grid. A late callback records one current sample and increments the missed-interval gap count; it never fabricates historical frames.
+- Individual volatile ObjectTable reads are rejected and counted without aborting the rest of the scan. StatusList is cached once per Actor scan, and Actor names are cached by ObjectTable slot plus GameObjectId.
+- Probe-only diagnostic strings are formatted lazily from the latest structured Event／Action Effect identity rather than on every capture callback.
+
 
 ### Runtime State and Development/Test Serialization
 
@@ -147,20 +158,27 @@ Core / Replay / Analyzer
 
 `RaidDebrief.Core` must not depend on Dalamud. Replay, Debrief, and Analyzer consume a pure finalized `PullRecord`; they never read live game objects directly.
 
-Initial conceptual models:
+Current domain collections:
 
 ```text
 PullRecord
-├─ Metadata
+├─ Metadata / CaptureFeatures
 ├─ Actors[]
-├─ PositionFrames[]
-├─ CombatEvents[]
-├─ StatusEvents[]
+├─ Frames[]
+│  └─ ActorStateSample[]
+│     ├─ Position / Rotation / HitboxRadius
+│     ├─ HP / MaxHP / BarrierPercentage
+│     └─ Dead / Targetable / Omnidirectional
+├─ Events[]
+├─ ActionEffects[]
+├─ ActionNames[]
 ├─ WaymarkFrames[]
 ├─ TargetMarkerFrames[]
-├─ StartTime
-└─ EndTime
+├─ StartedAtUtc
+└─ EndedAtUtc
 ```
+
+`ActionNames[]` is a Pull-local managed snapshot keyed by `ActionId`. Capture first accepts a resolved localized Lumina Action-sheet name and distinguishes startup-static from runtime-RSV resolution, then tries the Client RSV resolver, and finally an entity-matched enemy CastBar. Unresolved IDs retry at 500 ms intervals for at most 20 attempts rather than on every frame; an ID that never resolves produces no snapshot. Replay prefers the recorded snapshot so reserved encounter Actions remain named after the originating game session ends; legacy records without the feature remain load-compatible and fall back to current game data or `Action #ID`.
 
 ```text
 Actor
@@ -206,13 +224,17 @@ Initial EventType candidates:
 
 Do not finalize fields that cannot be reliably captured during Phase 0.
 
-## 5. Position Sampling
-Initial target: 10 Hz (100 ms).
+## 5. Position and State Sampling
+The implemented recording cadence is 10 Hz (100 ms).
 
 Rules:
-- Do not sample every rendered frame.
-- Start simple; optimize only after profiling.
-- Later compression may use delta encoding or unchanged-frame omission.
+- `CaptureSamplingScheduler` is the only owner of the active Pull timeline.
+- The first Pull sample is immediate in the same Framework callback that creates the active Capture.
+- Cadence uses monotonic elapsed time aligned to an absolute 100 ms grid; it does not accumulate frame delta time.
+- Low FPS or a hitch produces one real current sample plus a gap count, never duplicated historical samples.
+- Party, ObjectTable, StatusList, Waymark, and Target Marker extraction runs only when Capture or the open Developer Probe requests a 10 Hz full scan.
+- Lightweight lifecycle and combat-gate state remains observed every Framework／UI update.
+- Later compression may use delta encoding or unchanged-frame omission only after profiling and without changing Replay semantics.
 
 ## 6. Actor Identity
 Actor identity must survive:
@@ -248,9 +270,11 @@ Runtime:      ReplaySourceSnapshot → PullRecord → Replay
 
 - Position uses linear interpolation between adjacent samples within the same recorded presence interval.
 - Rotation is measured in radians and uses shortest-angle interpolation across the $2\pi$ wrap-around. Resolved rotation is normalized to $[-\pi,\pi)$; an exact $\pi$ tie resolves through $-\pi$.
-- Current HP, maximum HP, dead/alive, and targetable use the latest observation at or before the requested timestamp. Future discrete observations never backfill earlier state.
+- Current HP, maximum HP, barrier percentage, dead/alive, targetable, and omnidirectional state use the latest observation at or before the requested timestamp. Future discrete observations never backfill earlier state. `BarrierPercentage` is exposed only when `CaptureFeatures.BarrierState` declares that the Pull recorded it.
 - Position and rotation are not extrapolated beyond the latest available sample. Before an actor's first observation, it has no resolved state.
 - A recorded Actor despawn/spawn absence interval is not bridged by position or rotation interpolation.
+
+- Death correlation treats Action Effect callback time and sampled HP content as separate observations on one clock. It anchors on the last living HP sample before the Death transition, then selects the latest ordered Action Effect suffix whose replay crosses zero; effect position, not `effect timestamp >= frame timestamp`, defines the replay boundary. Pull-local clean single-effect HP transitions calibrate a conservative observation-lag window, with a bounded fallback when evidence is sparse. Barrier absorption and excessive observation lag prevent High confidence.
 
 ### Timeline, Waymark, and Target Marker ordering
 
@@ -264,7 +288,7 @@ Runtime:      ReplaySourceSnapshot → PullRecord → Replay
 - `ArenaProjection` maps recorded world X／Z into normalized 2D coordinates. Core's default `FromPullRecord` projection uses a neutral square field centered on the complete Pull's replay-visible observed bounds, with a minimum 40×40 world-unit extent. A host may instead supply explicit Core `ArenaBounds`; projection never mutates recorded samples, and recorded Rotation becomes a 2D facing unit vector.
 - `ArenaSceneBuilder` reuses indexed Actor, Waymark, and Target Marker state to populate a caller-owned `ArenaRenderScene`. Player markers include recorded PCs. BattleNpc markers include actors that were objectively observed targetable at least once, which keeps bosses and interactable enemies visible through untargetable states without encounter-specific classification.
 - Active Waymarks render in stable `WaymarkId` order. The Dalamud host maps A／B／C／D／1／2／3／4 to native game icons `61241／61242／61243／61247／61244／61245／61246／61248`, loads the eight shared textures once, centers each image on its recorded X／Z position, and falls back to the labeled marker if a texture is unavailable. A-D use a 1.25-world-unit radius; 1-4 use a 2.3-world-unit square edge. Both are projected through the current Map bounds and viewport zoom; native icon quads use a shared `1.5x` transparent-inset compensation while the geometric fallback retains the recorded world dimensions.
-- Active Target Markers follow their resolved Actor position and render above the Actor. Actor markers preserve Pull-local stable identity and recorded HP, dead/alive, and targetable state.
+- Active Target Markers follow their resolved Actor position and render above the Actor. Actor markers preserve Pull-local stable identity and recorded HP, barrier percentage availability, dead/alive, and targetable state.
 - Each sampled BattleNpc carries an objective `IsOmnidirectional` state. The Dalamud capture host resolves it from the cached Lumina `BNpcBase.IsOmnidirectional` flag or active `Directional Disregard` status `3808`; Replay never reads live status data. The in-game renderer uses the recorded state to switch between the directional 480×682 Target Circle and the 480×480 complete Target Ring while preserving recorded hitbox scale and facing. Captures without the feature use `ActorRecord.BaseId` for static Lumina fallback and explicitly warn that dynamic transitions are unavailable.
 - `RaidDebrief.UI` references Core domain data only. Its offline `SvgArenaRenderer` consumes an `ArenaRenderScene` and does not load JSON, access the filesystem, use live game objects, or depend on Dalamud. The Dalamud host loads native Waymark textures through `ITextureProvider` and Target Marker PNGs as manifest resources once; Draw performs no texture filesystem I/O.
 
@@ -276,13 +300,18 @@ Runtime:      ReplaySourceSnapshot → PullRecord → Replay
 - `ReplayWindow` is the formal Dalamud Replay host. Runtime selection waits for finalization and binds every background `ReplaySession` build to its CaptureId and source generation; completion is adopted only if a fresh atomic snapshot still identifies that request. A newer Runtime Pull or explicit Developer/Test import supersedes older work. The manual JSON path remains isolated behind the Developer/Test action, and Runtime never queries a latest repository, scans capture history, or restores a Pull across sessions.
 - The Dalamud host reads the Lumina `Map` sheet once on the framework thread and builds a Pull-independent canvas catalog from each row's `SizeFactor`, `OffsetX`, `OffsetY`, and texture ID. Runtime and Developer/Test background session construction receives the matching complete Map world bounds through `ArenaProjection.FromMapBounds`; no Territory／Map profile, encounter ID, or arena geometry is hard-coded. The same row-derived transform crops the central valid Map texture region, so background UVs and Actor／Waymark world coordinates share one projection. Missing／invalid rows fall back to Core's neutral observed field.
 - On session adoption, a Map-backed `ReplayWindow` centers the initial viewport on the Lumina Map origin (`world X/Z = -OffsetX/-OffsetY`) and uses that row's `SizeFactor / 100` as the clamped minimum zoom. This framing is Pull-independent and never reads Actor or Waymark positions; Reset restores the same row-derived viewport, and zoomed panning remains inside its initially visible region. Missing／invalid Map rows fall back to complete-field Fit.
-- The formal Replay UI exposes a chronological list of recorded player `Death` events only; selecting one seeks to that exact timestamp and pauses. It does not render colored Timeline markers, recent events, cast／status／raise／Wipe jump categories, or timestamp HP／status detail. Selecting a player changes only Actor opacity. At zoom above the Map-derived minimum, the viewport follows that visible player's projected position while honoring the existing safe pan boundary; absence preserves the last camera center, and manual drag clears the selection.
-- `Plugin.DrawUi` passes `LiveDataProbe.InCombat` and the persisted, default-enabled `CloseReplayOnCombatStart` setting to the window before `WindowSystem.Draw`; Replay does not read Dalamud conditions or live actors. `ReplayCombatGate` always rejects new explicit Replay opens during combat. With auto-close enabled, visible／playing／loading Replay work is paused, invalidated, and hidden. With it disabled, the existing window remains visible while playback and pending loads are suspended, and enabling auto-close during combat closes that visible window on the next UI update. Combat end never automatically reopens a window that was closed; the finalized source and paused session remain available for a later explicit request.
+- The formal Replay UI uses a fixed three-column hierarchy: Pull／Party context, dominant Arena, and Actor／Death context, followed by bottom-only playback controls, one Death-only Timeline, and complete Death Quick Jump. Party rows resolve timestamp HP, percentage, dead state, and a left-anchored recorded barrier overlay. The context follows the playhead's latest death within its bounded trailing window unless a selected player pins that Actor; otherwise it shows the selected Actor's timestamp vitality and state.
+- The context status grid reconstructs recorded player mitigation, barriers, defense increases, invulnerability, optional healing-over-time effects, and the active Boss's recorded damage-down debuffs. Status identity excludes countdown-only RemainingTime changes; display time counts down from the recorded timing anchor or, for legacy data, derives from the matching `StatusLost` unless an intervening refresh makes duration unavailable. Native status icons are loaded once, and recorded stack parameters remain visible.
+- Every currently targetable BattleNpc receives a fixed top-left Arena HUD group with HP percentage and a conditional recorded Cast row. Recorded Action names override current-session game data; unresolved `_rsv_` placeholders are never presented as user-facing names.
+- Selecting a Party member focuses Actor opacity and, above the Map-derived minimum zoom, follows that visible player's projected position within the safe pan boundary. Absence preserves the last center, and manual drag clears Focus.
+- `Plugin.DrawUi` passes `LiveDataProbe.InCombat` and the persisted, default-enabled `CloseReplayOnCombatStart` setting to the window before `WindowSystem.Draw`; Replay does not read Dalamud conditions or live actors. `ReplayCombatGate` always rejects new explicit Replay opens during combat. On the out-of-combat → in-combat edge, auto-close enabled pauses, invalidates pending work, and hides an active Replay; disabled auto-close keeps an existing window visible but pauses playback and pending work. Changing the setting after combat has already begun does not retroactively hide the window. Combat end never automatically reopens Replay.
 - Every successfully validated automatic Pull is analyzed on the finalization background task before publication. `ReplaySourceSnapshot` atomically exposes the `PullRecord`, its `DebriefSummary`, end reason, and monotonically increasing completion generation; validation or analysis failure preserves the previous complete pair. Pull ordinals are process-local automatic-Pull ordinals and are neither serialized nor restored across sessions.
 - `DebriefSummaryController` applies the existing per-generation post-Wipe lifecycle to the Summary: a generation finalized during combat is queued until the first out-of-combat UI update; every later Wipe is independent; combat entry dismisses a visible Summary; clear, manual, failed, disabled, or mismatched Pull／Summary pairs never appear. The persisted, default-enabled user setting retains the legacy JSON key `ShowWipeReplayPrompt` while its UI contract is cleanly renamed to “Wipe 後顯示 Debrief 摘要”.
-- `ReplayFramePolicy` is the allocation-free Draw boundary: closed Replay never draws; auto-close-enabled combat Replay neither draws nor advances; auto-close-disabled combat Replay may remain visible but never advances. Only visible, out-of-combat playback consumes ImGui delta time and rebuilds the reusable scene. `ReplayWindow.UpdateUiState` also pauses and cancels pending adoption after a manual close or combat suspension.
+- `ReplayFramePolicy` is the allocation-free Draw boundary: a closed Replay never draws; any open Replay remains drawable, including a window intentionally kept visible in combat, but only visible out-of-combat playback may advance. Combat-entry hiding is performed separately by `ReplayCombatGate`. `ReplayWindow.UpdateUiState` pauses and cancels pending adoption after manual close or combat suspension.
 - `ReplayLoadCoordinator` owns request cancellation and disposal. Supersession, source invalidation, combat hiding, manual closing, or Plugin disposal cancels the old request and checks cancellation before and after record loading and session construction. A background task returns only a completion value; it never writes window state directly. Disposed windows reject new work and cannot adopt a later completion.
-- Formal Draw iterates the indexed Timeline only when the collapsed death list is open and filters recorded player `Death` entries without materializing a new collection. Runtime Draw performs no JSON serialization, filesystem access, live actor traversal, complete-Timeline materialization, or new cache-layer lookup. Runtime／manual-source diagnostics and JSON import remain collapsed under the advanced development section.
+- Formal Draw uses the prebuilt presentation Death array and reconstructs bounded active-status rows into stack memory without materializing Timeline collections. Runtime Draw performs no JSON serialization, filesystem access, live actor traversal, complete-Timeline materialization, or new cache-layer lookup. Runtime／manual-source diagnostics and JSON import remain collapsed under the advanced development section.
+- `ReplayStatusEffectDatabase` classifies the cached English Lumina Status descriptions once into recorded-effect categories. Target kind remains part of the filter: player buffs and Boss damage-down debuffs are not interchangeable, Haima／Panhaima display only their recorded reserve stacks, and healing-over-time effects are hidden by default through persisted configuration.
+
 
 ## 8. Debrief Analyzer
 
@@ -299,15 +328,18 @@ Missing actor links remain explicit through `UnresolvedDeathEventCount`. Ambiguo
 The post-Wipe `DebriefSummaryWindow` consumes only the atomically published Summary. Its one-click request carries completion generation, CaptureId, and the suggested range. `ReplayWindow` rejects the request if either identity changed, builds the normal Runtime `ReplaySession`, seeks to the suggested start, and remains paused. It never reloads JSON or searches older Pulls.
 
 ## 9. Threading
-Game-facing reads should happen on the appropriate Dalamud/framework thread.
+All game-facing reads occur on the Dalamud Framework thread:
+- lightweight client／condition state on every Framework update;
+- Party, ObjectTable, StatusList, Waymark, and Target Marker extraction only for a prepared full scan;
+- Action-name resolution, including Lumina／Client RSV and enemy CastBar fallback;
+- synchronous validation and managed copying of native Action Effect callback data before the original hook returns.
 
 Background work may include:
-- Developer/test serialization
-- Compression
-- Replay preprocessing
-- Debrief analysis
+- Developer/test serialization;
+- Replay preprocessing and indexed session construction;
+- Debrief and Death-correlation analysis.
 
-Never access live game structures from arbitrary background threads.
+Background tasks consume only finalized managed `PullRecord` data. They never access live game structures, Lumina rows, Dalamud services, or ImGui state, and they return completion values rather than mutating windows directly.
 
 ## 10. Development and Testing Serialization
 

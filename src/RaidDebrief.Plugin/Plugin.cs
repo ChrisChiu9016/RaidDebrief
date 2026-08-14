@@ -9,7 +9,8 @@ namespace RaidDebrief.Plugin;
 
 public sealed class Plugin : IDalamudPlugin
 {
-    private const string CommandName = "/rdebrief";
+    private static readonly string[] CommandNames = ["/rdebrief", "/rd"];
+    internal static ReadOnlySpan<string> RegisteredCommandNames => CommandNames;
 
     [PluginService]
     internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -36,6 +37,9 @@ public sealed class Plugin : IDalamudPlugin
 
     [PluginService]
     internal static IGameInteropProvider GameInteropProvider { get; private set; } = null!;
+    [PluginService]
+    internal static IGameGui GameGui { get; private set; } = null!;
+
 
     [PluginService]
     internal static ITextureProvider TextureProvider { get; private set; } = null!;
@@ -52,6 +56,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WaymarkReader waymarkReader;
     private readonly TargetMarkerReader targetMarkerReader;
     private readonly BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog;
+    private readonly CaptureActionNameResolver captureActionNameResolver;
     private readonly CaptureService captureService;
     private readonly ActionEffectReader actionEffectReader;
     private readonly LiveDataProbe liveDataProbe;
@@ -66,6 +71,7 @@ public sealed class Plugin : IDalamudPlugin
         this.waymarkReader = new WaymarkReader(Log);
         this.targetMarkerReader = new TargetMarkerReader(Log);
         this.omnidirectionalityCatalog = new BattleNpcOmnidirectionalityCatalog(DataManager, Log);
+        this.captureActionNameResolver = new CaptureActionNameResolver(DataManager, GameGui, Log);
         this.captureService = new CaptureService(
             PluginInterface.GetPluginConfigDirectory(),
             DutyState,
@@ -73,7 +79,8 @@ public sealed class Plugin : IDalamudPlugin
             this.waymarkReader,
             this.targetMarkerReader,
             this.configuration.AutomaticCaptureEnabled,
-            this.SaveAutomaticCaptureSetting);
+            this.SaveAutomaticCaptureSetting,
+            resolveActionName: this.captureActionNameResolver.TryResolve);
         this.actionEffectReader = new ActionEffectReader(
             GameInteropProvider,
             Log,
@@ -92,6 +99,8 @@ public sealed class Plugin : IDalamudPlugin
             TextureProvider,
             DataManager,
             this.omnidirectionalityCatalog,
+            this.configuration.ShowHotEffects,
+            this.SaveShowHotEffectsSetting,
             PluginInterface.GetPluginConfigDirectory(),
             PluginInterface.AssemblyLocation.FullName);
         this.debriefSummaryWindow =
@@ -109,10 +118,13 @@ public sealed class Plugin : IDalamudPlugin
         this.windowSystem.AddWindow(this.replayWindow);
         this.windowSystem.AddWindow(this.debriefSummaryWindow);
 
-        CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
+        foreach (var commandName in CommandNames)
         {
-            HelpMessage = "開啟 Capture 視窗；使用 /rdebrief replay 開啟上一個 Pull 的 Replay。",
-        });
+            CommandManager.AddHandler(commandName, new CommandInfo(this.OnCommand)
+            {
+                HelpMessage = "開啟 Capture 視窗；使用 /rdebrief replay 或 /rd replay 開啟上一個 Pull 的 Replay。",
+            });
+        }
 
         PluginInterface.UiBuilder.Draw += this.DrawUi;
         PluginInterface.UiBuilder.OpenMainUi += this.ToggleMainUi;
@@ -126,7 +138,10 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= this.DrawUi;
         PluginInterface.UiBuilder.OpenMainUi -= this.ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= this.ToggleMainUi;
-        CommandManager.RemoveHandler(CommandName);
+        foreach (var commandName in CommandNames)
+        {
+            CommandManager.RemoveHandler(commandName);
+        }
 
         this.windowSystem.RemoveAllWindows();
         this.replayWindow.Dispose();
@@ -151,6 +166,12 @@ public sealed class Plugin : IDalamudPlugin
     private void SaveCloseReplayOnCombatStartSetting(bool enabled)
     {
         this.configuration.CloseReplayOnCombatStart = enabled;
+        PluginInterface.SavePluginConfig(this.configuration);
+    }
+
+    private void SaveShowHotEffectsSetting(bool enabled)
+    {
+        this.configuration.ShowHotEffects = enabled;
         PluginInterface.SavePluginConfig(this.configuration);
     }
     private void DrawUi()

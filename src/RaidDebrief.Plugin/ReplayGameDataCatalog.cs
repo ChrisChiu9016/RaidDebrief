@@ -5,52 +5,30 @@ using Dalamud.Plugin.Services;
 using ActionSheet = Lumina.Excel.Sheets.Action;
 using StatusSheet = Lumina.Excel.Sheets.Status;
 using Lumina.Excel;
+using RaidDebrief.Core;
 
 namespace RaidDebrief.Plugin;
 
 internal sealed class ReplayGameDataCatalog
 {
-    // Objective presentation allow-list only. Membership never implies sufficiency or a recommendation.
-    private static readonly uint[] MitigationStatusIds =
-    [
-        74,   // Sentinel
-        89,   // Vengeance
-        299,  // Sacred Soil
-        746,  // Dark Mind
-        849,  // Collective Unconscious
-        1178, // The Blackest Night
-        1191, // Rampart
-        1193, // Reprisal
-        1195, // Feint
-        1203, // Addle
-        1457, // Shake It Off
-        1826, // Shield Samba
-        1832, // Camouflage
-        1834, // Nebula
-        1872, // Temperance
-        1934, // Troubadour
-        1951, // Tactician
-        2618, // Kerachole
-        2619, // Taurochole
-        2678, // Bloodwhetting
-        2682, // Oblation
-        2683, // Heart of Corundum
-        2708, // Aquaveil
-        2717, // Exaltation
-        2931, // Expedient
-    ];
 
     private readonly ExcelSheet<ActionSheet> actionSheet;
     private readonly ExcelSheet<ActionSheet> englishActionSheet;
     private readonly Dictionary<uint, string> actionNames = new();
+    private readonly Dictionary<uint, string> recordedActionNames = new();
     private readonly Dictionary<uint, string> statusNames = new();
-    private readonly HashSet<uint> mitigationStatuses = new(MitigationStatusIds);
+    private readonly Dictionary<uint, uint> statusIconIds = new();
+    private readonly HashSet<uint> stackedStatusIds = [];
+    public ReplayStatusEffectDatabase StatusEffects { get; }
 
     public ReplayGameDataCatalog(IDataManager dataManager)
     {
         ArgumentNullException.ThrowIfNull(dataManager);
         this.actionSheet = dataManager.GetExcelSheet<ActionSheet>();
         this.englishActionSheet = dataManager.GetExcelSheet<ActionSheet>(ClientLanguage.English);
+        this.StatusEffects = new ReplayStatusEffectDatabase(
+            ReadStatusDescriptions(
+                dataManager.GetExcelSheet<StatusSheet>(ClientLanguage.English)));
         foreach (var action in this.actionSheet)
         {
             var name = action.Name.ToString();
@@ -62,16 +40,48 @@ internal sealed class ReplayGameDataCatalog
 
         foreach (var status in dataManager.GetExcelSheet<StatusSheet>())
         {
+            if (status.RowId == 0)
+            {
+                continue;
+            }
+
             var name = status.Name.ToString();
-            if (status.RowId != 0 && !string.IsNullOrWhiteSpace(name))
+            if (!string.IsNullOrWhiteSpace(name))
             {
                 this.statusNames[status.RowId] = name;
+            }
+            if (status.MaxStacks > 1)
+            {
+                this.stackedStatusIds.Add(status.RowId);
+            }
+
+
+            var iconId = (uint)status.Icon;
+            if (iconId != 0)
+            {
+                this.statusIconIds[status.RowId] = iconId;
             }
         }
     }
 
+    public void UseRecordedActionNames(PullRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        this.recordedActionNames.Clear();
+        foreach (var actionName in record.ActionNames)
+        {
+            this.recordedActionNames.Add(actionName.ActionId, actionName.Name);
+        }
+    }
+
+
     public string GetActionName(uint actionId)
     {
+        if (this.recordedActionNames.TryGetValue(actionId, out var recordedName))
+        {
+            return recordedName;
+        }
+
         if (this.actionNames.TryGetValue(actionId, out var name))
         {
             return name;
@@ -91,9 +101,22 @@ internal sealed class ReplayGameDataCatalog
         }
 
         name = ResolveActionName(actionId, localizedName, englishName);
-        this.actionNames[actionId] = name;
+        if (ShouldCacheActionName(localizedName, englishName))
+        {
+            this.actionNames[actionId] = name;
+        }
+
         return name;
     }
+
+    internal static string ResolveActionName(
+        uint actionId,
+        string? recordedName,
+        string? localizedName,
+        string? englishName) =>
+        IsResolvedName(recordedName)
+            ? recordedName!
+            : ResolveActionName(actionId, localizedName, englishName);
 
     internal static string ResolveActionName(
         uint actionId,
@@ -110,6 +133,9 @@ internal sealed class ReplayGameDataCatalog
             : $"Action #{actionId}";
     }
 
+    internal static bool ShouldCacheActionName(string? localizedName, string? englishName) =>
+        IsResolvedName(localizedName) || IsResolvedName(englishName);
+
     internal static bool IsResolvedName(string? name) =>
         !string.IsNullOrWhiteSpace(name)
         && !name.StartsWith("_rsv_", StringComparison.OrdinalIgnoreCase);
@@ -118,6 +144,20 @@ internal sealed class ReplayGameDataCatalog
         this.statusNames.TryGetValue(statusId, out var name)
             ? name
             : $"Status #{statusId}";
+    public bool TryGetStatusIconId(uint statusId, out uint iconId) =>
+        this.statusIconIds.TryGetValue(statusId, out iconId);
+    public bool HasStacks(uint statusId) =>
+        this.stackedStatusIds.Contains(statusId);
 
-    public bool IsMitigation(uint statusId) => this.mitigationStatuses.Contains(statusId);
+    private static IEnumerable<ReplayStatusDescription> ReadStatusDescriptions(
+        ExcelSheet<StatusSheet> statuses)
+    {
+        foreach (var status in statuses)
+        {
+            yield return new ReplayStatusDescription(
+                status.RowId,
+                status.Description.ToString());
+        }
+    }
+
 }

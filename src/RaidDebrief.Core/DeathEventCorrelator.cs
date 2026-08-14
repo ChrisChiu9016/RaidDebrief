@@ -33,6 +33,42 @@ public enum DeathCorrelationLimitations
     AmbiguousEffectOrdering = 1 << 4,
     ActorIdentityUnresolved = 1 << 5,
     HpObservationLag = 1 << 6,
+    /// <summary>
+    /// A barrier stood between the actor and the killing blow, but the recorded
+    /// Action Effect amount cannot be reconciled against the absorbed portion.
+    /// </summary>
+    BarrierAbsorptionUnverified = 1 << 7,
+}
+
+/// <summary>
+/// What the recorded barrier was doing when the actor died.
+/// </summary>
+/// <remarks>
+/// Deliberately not split into "consumed" versus "expired". Dying strips every status at
+/// once, so the duration remaining on a lost status says nothing about the barrier at the
+/// moment of death; a real capture shows ten statuses ending together with between 0.8 s
+/// and 24.6 s remaining. The barrier percentage carried by the last living sample is the
+/// only sound signal, and it self-aligns: that sample reports the state roughly one HP
+/// observation lag earlier, which is approximately when the killing blow landed.
+/// </remarks>
+public enum BarrierDisposition
+{
+    /// <summary>The capture predates <see cref="CaptureFeatures.BarrierState"/>.</summary>
+    NotRecorded,
+
+    /// <summary>No barrier was recorded on the last sample before death.</summary>
+    None,
+
+    /// <summary>A barrier was still recorded on the last sample before death.</summary>
+    Present,
+}
+
+public readonly record struct DeathBarrierObservation(
+    BarrierDisposition Disposition,
+    uint AmountAtDeath,
+    byte PercentageAtDeath)
+{
+    public bool StoodAgainstTheKillingBlow => this.Disposition == BarrierDisposition.Present;
 }
 
 public readonly record struct CorrelatedDamageEvent(
@@ -46,7 +82,7 @@ public readonly record struct CorrelatedDamageEvent(
 
 public sealed record DeathEventCorrelation
 {
-    public const int CurrentAlgorithmVersion = 1;
+    public const int CurrentAlgorithmVersion = 2;
 
     public required int DeathOriginalRecordedIndex { get; init; }
 
@@ -56,9 +92,24 @@ public sealed record DeathEventCorrelation
 
     public CorrelatedDamageEvent? KillingBlowCandidate { get; init; }
 
+    /// <summary>
+    /// Health remaining before the killing blow, excluding any barrier.
+    /// </summary>
     public uint? EstimatedHpBeforeHit { get; init; }
 
+    /// <summary>
+    /// Total damage the actor could still absorb before the killing blow: health plus a
+    /// barrier that the recorded status timeline shows was consumed rather than expired.
+    /// Equal to <see cref="EstimatedHpBeforeHit"/> when no barrier stood against the blow.
+    /// </summary>
+    public uint? EstimatedEffectivePoolBeforeHit { get; init; }
+
+    /// <summary>
+    /// Recorded damage in excess of <see cref="EstimatedEffectivePoolBeforeHit"/>.
+    /// </summary>
     public uint? EstimatedOverkill { get; init; }
+
+    public DeathBarrierObservation Barrier { get; init; }
 
     public required CorrelatedDamageEvent[] LastHits { get; init; }
 
@@ -79,13 +130,14 @@ public sealed class DeathEventCorrelator
 {
     private const long CorrelationLookbackMilliseconds = 3_000;
     private const long LastHitsLookbackMilliseconds = 10_000;
-    private const long HpLagThresholdMilliseconds = 250;
+    private const long DefaultHpObservationLagMilliseconds = 1_000;
+    private const long MaximumCalibrationLagMilliseconds = 2_000;
+    private const int MinimumCalibrationSamples = 3;
     private const int MaximumLastHits = 6;
 
     public DeathEventCorrelation[] Analyze(PullRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-
         var playerActorIds = new HashSet<int>();
         foreach (var actor in record.Actors)
         {
@@ -95,6 +147,7 @@ public sealed class DeathEventCorrelator
             }
         }
 
+        var hpLagCalibration = CalibrateHpObservationLag(record, playerActorIds);
         var results = new List<DeathEventCorrelation>();
         for (var eventIndex = 0; eventIndex < record.Events.Length; eventIndex++)
         {
@@ -106,7 +159,13 @@ public sealed class DeathEventCorrelator
                 continue;
             }
 
-            results.Add(this.AnalyzeDeath(record, eventIndex, actorId, observedEvent.TimestampMilliseconds));
+            results.Add(
+                this.AnalyzeDeath(
+                    record,
+                    eventIndex,
+                    actorId,
+                    observedEvent.TimestampMilliseconds,
+                    hpLagCalibration.ThresholdMilliseconds));
         }
 
         return results.ToArray();
@@ -116,11 +175,16 @@ public sealed class DeathEventCorrelator
         PullRecord record,
         int deathEventIndex,
         int actorId,
-        long deathTimestampMilliseconds)
+        long deathTimestampMilliseconds,
+        long hpLagThresholdMilliseconds)
     {
         var lastHits = new List<CorrelatedDamageEvent>(MaximumLastHits + 8);
         var deltas = new List<HpDelta>(32);
-        var simulationStart = Math.Max(0, deathTimestampMilliseconds - CorrelationLookbackMilliseconds);
+        var simulationStart = Math.Max(
+            0,
+            deathTimestampMilliseconds
+                - CorrelationLookbackMilliseconds
+                - hpLagThresholdMilliseconds);
         var lastHitsStart = Math.Max(0, deathTimestampMilliseconds - LastHitsLookbackMilliseconds);
 
         foreach (var actionEffect in record.ActionEffects)
@@ -197,49 +261,74 @@ public sealed class DeathEventCorrelator
             | DeathCorrelationEvidence.DamageAmountDecoded
             | DeathCorrelationEvidence.GlobalSequenceAvailable;
 
-        var firstDeltaTimestamp = deltas.Count == 0
-            ? simulationStart
-            : deltas[0].Event.TimestampMilliseconds;
-        var anchor = FindLastHpSampleAtOrBefore(record, actorId, firstDeltaTimestamp);
+        var anchor = FindLastLivingHpSampleBeforeDeath(
+            record,
+            actorId,
+            deathTimestampMilliseconds);
+        var barrier = ResolveDeathBarrier(record, actorId, deathTimestampMilliseconds);
         uint? estimatedHpBeforeHit = null;
+        uint? estimatedPoolBeforeHit = null;
         uint? estimatedOverkill = null;
         CorrelatedDamageEvent? candidate = null;
         var crossingCount = 0;
         long candidateTimestamp = 0;
 
-        if (anchor is { IsDead: false, CurrentHp: > 0 })
+        if (anchor is { CurrentHp: > 0 })
         {
             evidence |= DeathCorrelationEvidence.HpAnchorAvailable;
-            long virtualHp = anchor.Value.CurrentHp;
-            foreach (var delta in deltas)
+            long initialBarrierPool =
+                barrier.StoodAgainstTheKillingBlow ? barrier.AmountAtDeath : 0;
+            if (initialBarrierPool > 0)
             {
-                if (delta.Event.TimestampMilliseconds < anchor.Value.TimestampMilliseconds)
-                {
-                    continue;
-                }
+                limitations |= DeathCorrelationLimitations.BarrierAbsorptionUnverified;
+            }
 
-                if (delta.Kind == ActionEffectKind.Heal)
+            // The HP sample and Action Effect callback use the same clock but are not
+            // content-synchronous. Start from the last observed living HP, then choose
+            // the latest ordered suffix of effects that can cross zero. The suffix index,
+            // rather than its timestamp relative to the sample, is the replay anchor.
+            var replayStartIndex = FindLatestCrossingSuffix(
+                deltas,
+                anchor.Value,
+                initialBarrierPool);
+            if (replayStartIndex is { } startIndex)
+            {
+                long virtualHp = anchor.Value.CurrentHp;
+                var barrierPool = initialBarrierPool;
+                for (var deltaIndex = startIndex; deltaIndex < deltas.Count; deltaIndex++)
                 {
-                    virtualHp = Math.Min(anchor.Value.MaxHp, virtualHp + delta.Event.Amount);
-                    continue;
-                }
+                    var delta = deltas[deltaIndex];
+                    if (delta.Kind == ActionEffectKind.Heal)
+                    {
+                        virtualHp = Math.Min(anchor.Value.MaxHp, virtualHp + delta.Event.Amount);
+                        continue;
+                    }
 
-                var hpBefore = Math.Max(0, virtualHp);
-                virtualHp -= delta.Event.Amount;
-                if (hpBefore > 0 && virtualHp <= 0)
-                {
-                    crossingCount++;
-                    candidate = delta.Event;
-                    candidateTimestamp = delta.Event.TimestampMilliseconds;
-                    estimatedHpBeforeHit = (uint)Math.Min(uint.MaxValue, hpBefore);
-                    estimatedOverkill = (uint)Math.Min(uint.MaxValue, Math.Max(0, -virtualHp));
+                    var hpBefore = Math.Max(0, virtualHp);
+                    var poolBefore = hpBefore + barrierPool;
+                    var absorbed = Math.Min(barrierPool, (long)delta.Event.Amount);
+                    barrierPool -= absorbed;
+                    virtualHp -= delta.Event.Amount - absorbed;
+                    if (poolBefore > 0 && virtualHp <= 0)
+                    {
+                        crossingCount++;
+                        candidate = delta.Event;
+                        candidateTimestamp = delta.Event.TimestampMilliseconds;
+                        estimatedHpBeforeHit = (uint)Math.Min(uint.MaxValue, hpBefore);
+                        estimatedPoolBeforeHit = (uint)Math.Min(uint.MaxValue, poolBefore);
+                        estimatedOverkill =
+                            (uint)Math.Min(uint.MaxValue, Math.Max(0, -virtualHp));
+                    }
                 }
             }
 
             if (candidate is not null)
             {
                 evidence |= DeathCorrelationEvidence.VirtualHpCrossedZero;
-                var deathSample = FindFirstHpSampleAtOrAfter(record, actorId, deathTimestampMilliseconds);
+                var deathSample = FindFirstHpSampleAtOrAfter(
+                    record,
+                    actorId,
+                    deathTimestampMilliseconds);
                 if (deathSample is { IsDead: true, CurrentHp: 0 })
                 {
                     evidence |= DeathCorrelationEvidence.HpSamplesReconciled;
@@ -283,7 +372,8 @@ public sealed class DeathEventCorrelator
             limitations |= DeathCorrelationLimitations.AmbiguousEffectOrdering;
         }
 
-        if (deathTimestampMilliseconds - candidate.Value.TimestampMilliseconds > HpLagThresholdMilliseconds)
+        if (deathTimestampMilliseconds - candidate.Value.TimestampMilliseconds
+            > hpLagThresholdMilliseconds)
         {
             limitations |= DeathCorrelationLimitations.HpObservationLag;
         }
@@ -291,9 +381,13 @@ public sealed class DeathEventCorrelator
         var confidence = CorrelationConfidence.Low;
         if ((evidence & DeathCorrelationEvidence.VirtualHpCrossedZero) != 0)
         {
+            const DeathCorrelationLimitations highConfidenceBlockers =
+                DeathCorrelationLimitations.AmbiguousEffectOrdering
+                | DeathCorrelationLimitations.HpObservationLag
+                | DeathCorrelationLimitations.BarrierAbsorptionUnverified;
             confidence = (record.Features & CaptureFeatures.ActionEffectCapture) != 0
                 && crossingCount == 1
-                && (limitations & DeathCorrelationLimitations.AmbiguousEffectOrdering) == 0
+                && (limitations & highConfidenceBlockers) == 0
                     ? CorrelationConfidence.High
                     : CorrelationConfidence.Medium;
         }
@@ -305,7 +399,9 @@ public sealed class DeathEventCorrelator
             DeathTimestampMilliseconds = deathTimestampMilliseconds,
             KillingBlowCandidate = candidate,
             EstimatedHpBeforeHit = estimatedHpBeforeHit,
+            EstimatedEffectivePoolBeforeHit = estimatedPoolBeforeHit,
             EstimatedOverkill = estimatedOverkill,
+            Barrier = barrier,
             LastHits = lastHits.ToArray(),
             Confidence = confidence,
             Evidence = evidence,
@@ -331,22 +427,80 @@ public sealed class DeathEventCorrelator
             Limitations = limitations,
         };
 
-    private static HpObservation? FindLastHpSampleAtOrBefore(
+
+    /// <summary>
+    /// Reads the barrier the actor still carried on the last sample where they were alive.
+    /// See <see cref="BarrierDisposition"/> for why the status timeline cannot refine this.
+    /// </summary>
+    internal static DeathBarrierObservation ResolveDeathBarrier(
         PullRecord record,
         int actorId,
-        long timestampMilliseconds)
+        long deathTimestampMilliseconds)
+    {
+        if ((record.Features & CaptureFeatures.BarrierState) == 0)
+        {
+            return new DeathBarrierObservation(BarrierDisposition.NotRecorded, 0, 0);
+        }
+
+        ActorStateSample? lastLiving = null;
+        foreach (var frame in record.Frames)
+        {
+            var dead = false;
+            foreach (var actor in frame.Actors)
+            {
+                if (actor.StableActorId != actorId)
+                {
+                    continue;
+                }
+
+                if (frame.TimestampMilliseconds >= deathTimestampMilliseconds
+                    && (actor.IsDead || actor.CurrentHp == 0))
+                {
+                    dead = true;
+                }
+                else
+                {
+                    lastLiving = actor;
+                }
+
+                break;
+            }
+
+            if (dead)
+            {
+                break;
+            }
+        }
+
+        if (lastLiving is not { BarrierPercentage: > 0 } sample)
+        {
+            return new DeathBarrierObservation(BarrierDisposition.None, 0, 0);
+        }
+
+        return new DeathBarrierObservation(
+            BarrierDisposition.Present,
+            (uint)(((ulong)sample.MaxHp * sample.BarrierPercentage) / 100),
+            sample.BarrierPercentage);
+    }
+
+    private static HpObservation? FindLastLivingHpSampleBeforeDeath(
+        PullRecord record,
+        int actorId,
+        long deathTimestampMilliseconds)
     {
         HpObservation? result = null;
         foreach (var frame in record.Frames)
         {
-            if (frame.TimestampMilliseconds > timestampMilliseconds)
+            if (frame.TimestampMilliseconds >= deathTimestampMilliseconds)
             {
                 break;
             }
 
             foreach (var actor in frame.Actors)
             {
-                if (actor.StableActorId == actorId)
+                if (actor.StableActorId == actorId
+                    && !actor.IsDead
+                    && actor.CurrentHp > 0)
                 {
                     result = new HpObservation(
                         frame.TimestampMilliseconds,
@@ -359,6 +513,163 @@ public sealed class DeathEventCorrelator
         }
 
         return result;
+    }
+
+    private static int? FindLatestCrossingSuffix(
+        List<HpDelta> deltas,
+        in HpObservation anchor,
+        long initialBarrierPool)
+    {
+        for (var startIndex = deltas.Count - 1; startIndex >= 0; startIndex--)
+        {
+            long virtualHp = anchor.CurrentHp;
+            var barrierPool = initialBarrierPool;
+            for (var deltaIndex = startIndex; deltaIndex < deltas.Count; deltaIndex++)
+            {
+                var delta = deltas[deltaIndex];
+                if (delta.Kind == ActionEffectKind.Heal)
+                {
+                    virtualHp = Math.Min(anchor.MaxHp, virtualHp + delta.Event.Amount);
+                    continue;
+                }
+
+                var absorbed = Math.Min(barrierPool, (long)delta.Event.Amount);
+                barrierPool -= absorbed;
+                virtualHp -= delta.Event.Amount - absorbed;
+            }
+
+            if (virtualHp <= 0)
+            {
+                return startIndex;
+            }
+        }
+
+        return null;
+    }
+
+    private static HpLagCalibration CalibrateHpObservationLag(
+        PullRecord record,
+        HashSet<int> playerActorIds)
+    {
+        var observations = new List<long>(32);
+        var previousSamples = new Dictionary<int, HpObservation>(playerActorIds.Count);
+        foreach (var frame in record.Frames)
+        {
+            foreach (var actor in frame.Actors)
+            {
+                if (!playerActorIds.Contains(actor.StableActorId))
+                {
+                    continue;
+                }
+
+                var current = new HpObservation(
+                    frame.TimestampMilliseconds,
+                    actor.CurrentHp,
+                    actor.MaxHp,
+                    actor.IsDead);
+                if (previousSamples.TryGetValue(actor.StableActorId, out var previous)
+                    && !previous.IsDead
+                    && !current.IsDead
+                    && previous.CurrentHp != current.CurrentHp
+                    && actor.BarrierPercentage == 0)
+                {
+                    TryAddCalibrationObservation(
+                        record,
+                        actor.StableActorId,
+                        previous,
+                        current,
+                        observations);
+                }
+
+                previousSamples[actor.StableActorId] = current;
+            }
+        }
+
+        if (observations.Count < MinimumCalibrationSamples)
+        {
+            return new HpLagCalibration(DefaultHpObservationLagMilliseconds);
+        }
+
+        observations.Sort();
+        var percentileIndex = (observations.Count * 9) / 10;
+        var threshold = observations[Math.Min(observations.Count - 1, percentileIndex)];
+        return new HpLagCalibration(
+            Math.Clamp(
+                threshold,
+                DefaultHpObservationLagMilliseconds / 2,
+                MaximumCalibrationLagMilliseconds));
+    }
+
+    private static void TryAddCalibrationObservation(
+        PullRecord record,
+        int actorId,
+        in HpObservation previous,
+        in HpObservation current,
+        List<long> destination)
+    {
+        HpDelta? match = null;
+        var matchCount = 0;
+        var windowStart = Math.Max(
+            0,
+            current.TimestampMilliseconds - MaximumCalibrationLagMilliseconds);
+        foreach (var actionEffect in record.ActionEffects)
+        {
+            if (actionEffect.TimestampMilliseconds < windowStart)
+            {
+                continue;
+            }
+
+            if (actionEffect.TimestampMilliseconds > current.TimestampMilliseconds)
+            {
+                break;
+            }
+
+            for (var targetIndex = 0; targetIndex < actionEffect.Targets.Length; targetIndex++)
+            {
+                var target = actionEffect.Targets[targetIndex];
+                if (target.TargetStableActorId != actorId)
+                {
+                    continue;
+                }
+
+                foreach (var entry in target.Entries)
+                {
+                    if (entry.Amount is not { } amount
+                        || entry.Kind is not (ActionEffectKind.Damage or ActionEffectKind.Heal))
+                    {
+                        continue;
+                    }
+
+                    var observedAmount = previous.CurrentHp > current.CurrentHp
+                        ? previous.CurrentHp - current.CurrentHp
+                        : current.CurrentHp - previous.CurrentHp;
+                    var expectedKind = previous.CurrentHp > current.CurrentHp
+                        ? ActionEffectKind.Damage
+                        : ActionEffectKind.Heal;
+                    if (entry.Kind != expectedKind || amount != observedAmount)
+                    {
+                        continue;
+                    }
+
+                    matchCount++;
+                    match = new HpDelta(
+                        new CorrelatedDamageEvent(
+                            actionEffect.TimestampMilliseconds,
+                            actionEffect.GlobalSequence,
+                            actionEffect.ActionId,
+                            actionEffect.SourceStableActorId,
+                            targetIndex,
+                            entry.Index,
+                            amount),
+                        entry.Kind);
+                }
+            }
+        }
+
+        if (matchCount == 1 && match is { } unique)
+        {
+            destination.Add(current.TimestampMilliseconds - unique.Event.TimestampMilliseconds);
+        }
     }
 
     private static HpObservation? FindFirstHpSampleAtOrAfter(
@@ -394,6 +705,8 @@ public sealed class DeathEventCorrelator
         uint CurrentHp,
         uint MaxHp,
         bool IsDead);
+
+    private readonly record struct HpLagCalibration(long ThresholdMilliseconds);
 
     private readonly record struct HpDelta(
         CorrelatedDamageEvent Event,

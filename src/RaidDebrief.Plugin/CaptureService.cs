@@ -18,6 +18,7 @@ internal sealed class CaptureService : IDisposable
     private readonly Action<string, PullRecord> exportCapture;
     private readonly Action<PullRecord> validateCapture;
     private readonly Func<PullRecord, long?, DebriefSummary> analyzeDebrief;
+    private readonly Func<uint, uint, RecordedActionName?> resolveActionName;
     private readonly IDutyState dutyState;
     private readonly IPluginLog log;
     private readonly WaymarkReader waymarkReader;
@@ -42,7 +43,10 @@ internal sealed class CaptureService : IDisposable
     private bool actionEffectCaptureAvailable;
     private long completedPullCount;
     private long nextAutomaticPullOrdinal;
+    private long nextActiveCaptureEpoch;
+    private long activeCaptureEpoch;
     private long? activePullOrdinal;
+    private FrameworkCaptureSample? pendingFrameworkSample;
     private long sampleCount;
     private int actorCount;
     private long gapCount;
@@ -50,7 +54,8 @@ internal sealed class CaptureService : IDisposable
     private int eventCount;
     private int waymarkFrameCount;
     private int actionEffectCount;
-    private string? lastActionEffect;
+    private ActionEffectRecord? lastActionEffectRecord;
+    private string? lastActionEffectText;
     private long waymarkReadFailureCount;
     private bool waymarkReaderChecked;
     private bool waymarkReaderAvailable;
@@ -63,7 +68,9 @@ internal sealed class CaptureService : IDisposable
     private double maximumSamplingMilliseconds;
     private double? lastSerializationMilliseconds;
     private string statusMessage = "尚未開始擷取。";
-    private string? lastEvent;
+    private ObservedEvent? lastEventRecord;
+    private string? lastEventText;
+    private long diagnosticsFormatCount;
     private string? lastWaymarkError;
     private string? lastTargetMarkerError;
     private string? lastExportPath;
@@ -80,13 +87,15 @@ internal sealed class CaptureService : IDisposable
         AutomaticPullLifecycle? automaticLifecycle = null,
         Action<string, PullRecord>? exportCapture = null,
         Action<PullRecord>? validateCapture = null,
-        Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null)
+        Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null,
+        Func<uint, uint, RecordedActionName?>? resolveActionName = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(developerExportDirectory);
         this.developerExportDirectory = Path.GetFullPath(developerExportDirectory);
         this.exportCapture = exportCapture ?? CaptureJson.Save;
         this.validateCapture = validateCapture ?? PullRecordValidator.Validate;
         this.analyzeDebrief = analyzeDebrief ?? new DebriefAnalyzer().Analyze;
+        this.resolveActionName = resolveActionName ?? ((_, _) => null);
         this.dutyState = dutyState;
         this.log = log;
         this.waymarkReader = waymarkReader;
@@ -125,9 +134,9 @@ internal sealed class CaptureService : IDisposable
                     this.gapCount,
                     this.rejectedActorSampleCount,
                     this.eventCount,
-                    this.lastEvent,
+                    this.GetLastEventText(),
                     this.actionEffectCount,
-                    this.lastActionEffect,
+                    this.GetLastActionEffectText(),
                     this.waymarkFrameCount,
                     this.waymarkReadFailureCount,
                     this.waymarkReaderChecked,
@@ -172,6 +181,17 @@ internal sealed class CaptureService : IDisposable
             lock (this.gate)
             {
                 return this.activeCapture is not null;
+            }
+        }
+    }
+
+    internal long DiagnosticsFormatCount
+    {
+        get
+        {
+            lock (this.gate)
+            {
+                return this.diagnosticsFormatCount;
             }
         }
     }
@@ -244,10 +264,7 @@ internal sealed class CaptureService : IDisposable
         }
     }
 
-
-    public void RecordFrameworkSnapshot(
-        ReadOnlySpan<ActorProbeSnapshot> actors,
-        ReadOnlySpan<PartyMemberProbeSnapshot> partyMembers,
+    public FrameworkCaptureDecision BeginFrameworkUpdate(
         bool inCombat,
         uint territoryType,
         uint mapId,
@@ -258,7 +275,13 @@ internal sealed class CaptureService : IDisposable
         {
             if (this.disposed)
             {
-                return;
+                return default;
+            }
+
+            if (this.pendingFrameworkSample is not null)
+            {
+                throw new InvalidOperationException(
+                    "The pending framework sample must be submitted or cancelled before the next update.");
             }
 
             var wasInDutyInstance = this.isInDutyInstance;
@@ -282,12 +305,12 @@ internal sealed class CaptureService : IDisposable
                                 "已離開 instance；正在背景完成並驗證自動 Pull。");
                         }
 
-                        return;
+                        return default;
                     }
 
                     if (this.backgroundTask is { IsCompleted: false })
                     {
-                        return;
+                        return default;
                     }
 
                     if (this.automaticLifecycle.State == AutomaticPullState.Idle
@@ -297,7 +320,7 @@ internal sealed class CaptureService : IDisposable
                     }
 
                     this.statusMessage = "自動 Pull 擷取等待進入 instance；instance 外不會開始。";
-                    return;
+                    return default;
                 }
 
                 if (!wasInDutyInstance)
@@ -315,7 +338,7 @@ internal sealed class CaptureService : IDisposable
                         this.ObserveAutomaticLifecycle(lifecycleTimestampMilliseconds, inCombat);
                     }
 
-                    return;
+                    return default;
                 }
 
                 lifecycleCommand = this.ObserveAutomaticLifecycle(
@@ -327,62 +350,149 @@ internal sealed class CaptureService : IDisposable
                 }
             }
 
-            if (this.activeCapture is null)
-            {
-                return;
-            }
-
-            var startedAt = Stopwatch.GetTimestamp();
-            var result = this.activeCapture.TryRecordFrame(
-                actors,
-                partyMembers,
-                inCombat,
-                this.waymarkReader,
-                this.targetMarkerReader);
-            if (result.Recorded)
-            {
-                this.sampleCount = this.activeCapture.Frames.Count;
-                this.actorCount = this.activeCapture.Actors.Count;
-                this.gapCount += result.Gaps;
-                this.rejectedActorSampleCount += result.RejectedActorSamples;
-                this.eventCount = this.activeCapture.Events.Count;
-                this.lastEvent = this.activeCapture.LastEvent is { } observedEvent
-                    ? FormatEvent(observedEvent)
-                    : null;
-                this.waymarkReaderChecked = true;
-                this.waymarkReaderAvailable = result.WaymarkReadSucceeded;
-                if (!result.WaymarkReadSucceeded)
-                {
-                    this.waymarkReadFailureCount++;
-                }
-
-                this.lastWaymarkError = this.waymarkReader.LastError;
-                this.waymarkFrameCount = this.activeCapture.WaymarkFrames.Count;
-                this.latestWaymarks = this.activeCapture.LatestWaymarks;
-                this.targetMarkerReaderChecked = true;
-                this.targetMarkerReaderAvailable = result.TargetMarkerReadSucceeded;
-                if (!result.TargetMarkerReadSucceeded)
-                {
-                    this.targetMarkerReadFailureCount++;
-                }
-
-                this.lastTargetMarkerError = this.targetMarkerReader.LastError;
-                this.targetMarkerFrameCount = this.activeCapture.TargetMarkerFrames.Count;
-                this.averageSampleIntervalMilliseconds = this.activeCapture.AverageSampleIntervalMilliseconds;
-                this.lastSamplingMilliseconds = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-                this.maximumSamplingMilliseconds = Math.Max(
-                    this.maximumSamplingMilliseconds,
-                    this.lastSamplingMilliseconds);
-            }
-
             if (lifecycleCommand == AutomaticPullCommand.Finalize)
             {
                 this.BeginFinalize(
                     isAutomatic: true,
                     exportJson: false,
                     "自動 Pull 已脫戰；正在背景完成並驗證。");
+                return default;
             }
+
+            if (this.activeCapture is null)
+            {
+                return default;
+            }
+
+            var preparation = this.activeCapture.PrepareFrame();
+            if (!preparation.ShouldSample)
+            {
+                return default;
+            }
+
+            var sample = new FrameworkCaptureSample(
+                this.activeCaptureEpoch,
+                inCombat,
+                preparation);
+            this.pendingFrameworkSample = sample;
+            return new FrameworkCaptureDecision(true, sample);
         }
+    }
+
+    public void SubmitFrameworkSample(
+        in FrameworkCaptureSample sample,
+        ReadOnlySpan<ActorProbeSnapshot> actors,
+        ReadOnlySpan<PartyMemberProbeSnapshot> partyMembers)
+    {
+        lock (this.gate)
+        {
+            this.RequirePendingFrameworkSample(sample);
+            if (this.activeCapture is null
+                || sample.CaptureEpoch != this.activeCaptureEpoch)
+            {
+                this.pendingFrameworkSample = null;
+                return;
+            }
+
+            var startedAt = Stopwatch.GetTimestamp();
+            FrameRecordResult result;
+            try
+            {
+                result = this.activeCapture.RecordPreparedFrame(
+                    sample.Preparation,
+                    actors,
+                    partyMembers,
+                    sample.InCombat,
+                    this.waymarkReader,
+                    this.targetMarkerReader);
+            }
+            finally
+            {
+                this.pendingFrameworkSample = null;
+            }
+
+            this.UpdateSampleStatus(result, startedAt);
+        }
+    }
+
+    public void CancelFrameworkSample(in FrameworkCaptureSample sample)
+    {
+        lock (this.gate)
+        {
+            this.RequirePendingFrameworkSample(sample);
+            if (this.activeCapture is not null
+                && sample.CaptureEpoch == this.activeCaptureEpoch)
+            {
+                this.activeCapture.CancelFrame(sample.Preparation);
+            }
+
+            this.pendingFrameworkSample = null;
+        }
+    }
+
+    internal void RecordFrameworkSnapshot(
+        ReadOnlySpan<ActorProbeSnapshot> actors,
+        ReadOnlySpan<PartyMemberProbeSnapshot> partyMembers,
+        bool inCombat,
+        uint territoryType,
+        uint mapId,
+        uint instance,
+        bool isInDutyInstance = true)
+    {
+        var decision = this.BeginFrameworkUpdate(
+            inCombat,
+            territoryType,
+            mapId,
+            instance,
+            isInDutyInstance);
+        if (decision.SampleRequested)
+        {
+            this.SubmitFrameworkSample(
+                decision.Sample,
+                actors,
+                partyMembers);
+        }
+    }
+
+    private void UpdateSampleStatus(
+        in FrameRecordResult result,
+        long startedAt)
+    {
+        if (!result.Recorded || this.activeCapture is null)
+        {
+            return;
+        }
+
+        this.sampleCount = this.activeCapture.Frames.Count;
+        this.actorCount = this.activeCapture.Actors.Count;
+        this.gapCount += result.Gaps;
+        this.rejectedActorSampleCount += result.RejectedActorSamples;
+        this.eventCount = this.activeCapture.Events.Count;
+        this.UpdateLastEvent(this.activeCapture.LastEvent);
+        this.waymarkReaderChecked = true;
+        this.waymarkReaderAvailable = result.WaymarkReadSucceeded;
+        if (!result.WaymarkReadSucceeded)
+        {
+            this.waymarkReadFailureCount++;
+        }
+
+        this.lastWaymarkError = this.waymarkReader.LastError;
+        this.waymarkFrameCount = this.activeCapture.WaymarkFrames.Count;
+        this.latestWaymarks = this.activeCapture.LatestWaymarks;
+        this.targetMarkerReaderChecked = true;
+        this.targetMarkerReaderAvailable = result.TargetMarkerReadSucceeded;
+        if (!result.TargetMarkerReadSucceeded)
+        {
+            this.targetMarkerReadFailureCount++;
+        }
+
+        this.lastTargetMarkerError = this.targetMarkerReader.LastError;
+        this.targetMarkerFrameCount = this.activeCapture.TargetMarkerFrames.Count;
+        this.averageSampleIntervalMilliseconds = this.activeCapture.AverageSampleIntervalMilliseconds;
+        this.lastSamplingMilliseconds = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        this.maximumSamplingMilliseconds = Math.Max(
+            this.maximumSamplingMilliseconds,
+            this.lastSamplingMilliseconds);
     }
 
     public void SetActionEffectCaptureAvailability(bool available)
@@ -420,7 +530,8 @@ internal sealed class CaptureService : IDisposable
                 animationTargetObjectId,
                 targets);
             this.actionEffectCount = this.activeCapture.ActionEffects.Count;
-            this.lastActionEffect = FormatActionEffect(actionEffect);
+            this.lastActionEffectRecord = actionEffect;
+            this.lastActionEffectText = null;
         }
     }
 
@@ -439,7 +550,10 @@ internal sealed class CaptureService : IDisposable
             territoryType,
             mapId,
             instance,
-            this.actionEffectCaptureAvailable);
+            this.actionEffectCaptureAvailable,
+            this.resolveActionName);
+        this.activeCaptureEpoch = ++this.nextActiveCaptureEpoch;
+        this.pendingFrameworkSample = null;
         this.activeCaptureIsAutomatic = isAutomatic;
         this.activePullOrdinal = isAutomatic
             ? ++this.nextAutomaticPullOrdinal
@@ -449,9 +563,12 @@ internal sealed class CaptureService : IDisposable
         this.gapCount = 0;
         this.rejectedActorSampleCount = 0;
         this.eventCount = 0;
-        this.lastEvent = null;
+        this.lastEventRecord = null;
+        this.lastEventText = null;
         this.actionEffectCount = 0;
-        this.lastActionEffect = null;
+        this.lastActionEffectRecord = null;
+        this.lastActionEffectText = null;
+        this.diagnosticsFormatCount = 0;
         this.waymarkFrameCount = 0;
         this.waymarkReadFailureCount = 0;
         this.waymarkReaderChecked = false;
@@ -494,6 +611,8 @@ internal sealed class CaptureService : IDisposable
         var finalizationGeneration = this.BeginReplayFinalization(record);
         var endReason = completedEndReason?.ToString() ?? "ManualStop";
         this.activeCapture = null;
+        this.activeCaptureEpoch = 0;
+        this.pendingFrameworkSample = null;
         this.activeCaptureIsAutomatic = false;
         this.activePullOrdinal = null;
         this.statusMessage = message;
@@ -539,7 +658,7 @@ internal sealed class CaptureService : IDisposable
 
             var observedEvent = this.activeCapture.AddDutyEvent(type);
             this.eventCount = this.activeCapture.Events.Count;
-            this.lastEvent = FormatEvent(observedEvent);
+            this.UpdateLastEvent(observedEvent);
 
             if (!this.automaticCaptureEnabled || !this.activeCaptureIsAutomatic)
             {
@@ -692,7 +811,7 @@ internal sealed class CaptureService : IDisposable
                 this.automaticLifecycle.MarkCompleted();
             }
             this.statusMessage =
-                $"Pull 已完成並通過驗證：{record.Frames.Length:N0} samples、{record.Actors.Length:N0} actors、{record.Events.Length:N0} events、{record.ActionEffects.Length:N0} Action Effects、{record.WaymarkFrames.Length:N0} Waymark frames、{record.TargetMarkerFrames.Length:N0} Target Marker frames。";
+                $"Pull 已完成並通過驗證：{record.Frames.Length:N0} samples、{record.Actors.Length:N0} actors、{record.Events.Length:N0} events、{record.ActionEffects.Length:N0} Action Effects、{record.ActionNames.Length:N0} Action names、{record.WaymarkFrames.Length:N0} Waymark frames、{record.TargetMarkerFrames.Length:N0} Target Marker frames。";
         }
         this.log.Information(
             "Raid Debrief {Mode} capture {CaptureId} finalized and validated because {FinalizeReason}.",
@@ -798,6 +917,58 @@ internal sealed class CaptureService : IDisposable
     {
         ObjectDisposedException.ThrowIf(this.disposed, this);
     }
+
+    private void RequirePendingFrameworkSample(in FrameworkCaptureSample sample)
+    {
+        if (this.pendingFrameworkSample is not { } pending || pending != sample)
+        {
+            throw new InvalidOperationException("The framework sample is not pending.");
+        }
+    }
+
+    private void UpdateLastEvent(ObservedEvent? observedEvent)
+    {
+        if (ReferenceEquals(this.lastEventRecord, observedEvent))
+        {
+            return;
+        }
+
+        this.lastEventRecord = observedEvent;
+        this.lastEventText = null;
+    }
+
+    private string? GetLastEventText()
+    {
+        if (this.lastEventRecord is null)
+        {
+            return null;
+        }
+
+        if (this.lastEventText is null)
+        {
+            this.lastEventText = FormatEvent(this.lastEventRecord);
+            this.diagnosticsFormatCount++;
+        }
+
+        return this.lastEventText;
+    }
+
+    private string? GetLastActionEffectText()
+    {
+        if (this.lastActionEffectRecord is null)
+        {
+            return null;
+        }
+
+        if (this.lastActionEffectText is null)
+        {
+            this.lastActionEffectText = FormatActionEffect(this.lastActionEffectRecord);
+            this.diagnosticsFormatCount++;
+        }
+
+        return this.lastActionEffectText;
+    }
+
     private static string FormatEvent(ObservedEvent observedEvent)
     {
         var actor = observedEvent.StableActorId is { } stableActorId
@@ -830,7 +1001,13 @@ internal sealed class CaptureService : IDisposable
     private sealed class ActiveCapture
     {
         private readonly Dictionary<ulong, int> stableActorIds = new();
+        private const long ActionNameRetryIntervalMilliseconds = 500;
+        private const int MaximumActionNameResolutionAttempts = 20;
+
         private readonly PolledEventDetector eventDetector = new();
+        private readonly Dictionary<uint, RecordedActionName> actionNames = new();
+        private readonly Dictionary<uint, ActionNameRetryState> actionNameRetries = new();
+        private readonly Func<uint, uint, RecordedActionName?> resolveActionName;
         private readonly WaymarkTimelineBuilder waymarkTimeline = new();
         private readonly WaymarkObservation[] waymarkObservations = new WaymarkObservation[WaymarkReader.MarkerCount];
         private readonly TargetMarkerTimelineBuilder targetMarkerTimeline = new();
@@ -841,7 +1018,8 @@ internal sealed class CaptureService : IDisposable
         private readonly DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
         private int playerAliasCount;
         private PolledActorObservation[] observations = [];
-        private long nextSampleAtMilliseconds;
+        private readonly CaptureSamplingScheduler samplingScheduler =
+            new(SampleIntervalMilliseconds);
         private bool capturedTargetMarkers;
         private bool omnidirectionalityStateComplete = true;
         private bool capturedPartyMembership;
@@ -853,12 +1031,14 @@ internal sealed class CaptureService : IDisposable
             uint territoryType,
             uint mapId,
             uint instance,
-            bool actionEffectCaptureAvailable)
+            bool actionEffectCaptureAvailable,
+            Func<uint, uint, RecordedActionName?> resolveActionName)
         {
             this.TerritoryType = territoryType;
             this.MapId = mapId;
             this.Instance = instance;
             this.actionEffectCaptureComplete = actionEffectCaptureAvailable;
+            this.resolveActionName = resolveActionName;
         }
 
         public uint TerritoryType { get; }
@@ -891,28 +1071,27 @@ internal sealed class CaptureService : IDisposable
         public void MarkActionEffectCaptureUnavailable() =>
             this.actionEffectCaptureComplete = false;
 
-        public FrameRecordResult TryRecordFrame(
+        public CaptureSamplePreparation PrepareFrame() =>
+            this.samplingScheduler.Prepare(this.GetElapsedMilliseconds());
+
+        public void CancelFrame(in CaptureSamplePreparation preparation) =>
+            this.samplingScheduler.Cancel(preparation);
+
+        public FrameRecordResult RecordPreparedFrame(
+            in CaptureSamplePreparation preparation,
             ReadOnlySpan<ActorProbeSnapshot> actors,
             ReadOnlySpan<PartyMemberProbeSnapshot> partyMembers,
             bool inCombat,
             WaymarkReader waymarkReader,
             TargetMarkerReader targetMarkerReader)
         {
-            var timestampMilliseconds = this.GetElapsedMilliseconds();
-            if (timestampMilliseconds < this.nextSampleAtMilliseconds)
+            if (!preparation.ShouldSample)
             {
-                return default;
+                throw new InvalidOperationException("A prepared sample is required.");
             }
 
-            long gaps = 0;
-            if (this.Frames.Count > 0)
-            {
-                var elapsedSincePrevious = timestampMilliseconds - this.Frames[^1].TimestampMilliseconds;
-                gaps = Math.Max(0, ((elapsedSincePrevious + (SampleIntervalMilliseconds / 2)) / SampleIntervalMilliseconds) - 1);
-            }
-
-            this.nextSampleAtMilliseconds =
-                ((timestampMilliseconds / SampleIntervalMilliseconds) + 1) * SampleIntervalMilliseconds;
+            this.samplingScheduler.Commit(preparation);
+            var timestampMilliseconds = preparation.TimestampMilliseconds;
 
             if (this.observations.Length < actors.Length)
             {
@@ -949,6 +1128,14 @@ internal sealed class CaptureService : IDisposable
                     this.castTimingComplete = false;
                 }
 
+                if (actor.IsCasting && actor.CastActionId != 0)
+                {
+                    this.TryCaptureActionName(
+                        actor.CastActionId,
+                        actor.EntityId,
+                        timestampMilliseconds);
+                }
+
                 var statusCount = Math.Min(actor.StatusCount, actor.Statuses.Length);
                 for (var statusIndex = 0; statusIndex < statusCount; statusIndex++)
                 {
@@ -958,7 +1145,6 @@ internal sealed class CaptureService : IDisposable
                         this.statusTimingComplete = false;
                     }
                 }
-
 
                 if (!this.stableActorIds.TryGetValue(actor.GameObjectId, out var stableActorId))
                 {
@@ -999,12 +1185,12 @@ internal sealed class CaptureService : IDisposable
                     HitboxRadius = actor.HitboxRadius,
                     CurrentHp = actor.CurrentHp,
                     MaxHp = actor.MaxHp,
+                    BarrierPercentage = actor.BarrierPercentage,
                     IsDead = actor.IsDead,
                     IsTargetable = actor.IsTargetable,
                     IsOmnidirectional = actor.IsOmnidirectional,
                 });
 
-                statusCount = Math.Min(actor.StatusCount, actor.Statuses.Length);
                 this.observations[observationCount] = new PolledActorObservation(
                     stableActorId,
                     actor.GameObjectId,
@@ -1036,7 +1222,7 @@ internal sealed class CaptureService : IDisposable
 
             return new FrameRecordResult(
                 true,
-                gaps,
+                preparation.Gaps,
                 rejectedActorSamples,
                 waymarkReadSucceeded,
                 targetMarkerReadSucceeded);
@@ -1099,6 +1285,9 @@ internal sealed class CaptureService : IDisposable
                 };
             }
 
+            var actionNames = new List<RecordedActionName>(this.actionNames.Values);
+            actionNames.Sort(static (left, right) => left.ActionId.CompareTo(right.ActionId));
+
             return new PullRecord
             {
                 Features = CaptureFeatures.ActorOwnerId
@@ -1120,7 +1309,9 @@ internal sealed class CaptureService : IDisposable
                         : CaptureFeatures.None)
                     | (this.actionEffectCaptureComplete
                         ? CaptureFeatures.ActionEffectCapture
-                        : CaptureFeatures.None),
+                        : CaptureFeatures.None)
+                    | CaptureFeatures.ActionNameSnapshot
+                    | CaptureFeatures.BarrierState,
                 CaptureId = Guid.NewGuid(),
                 StartedAtUtc = this.startedAtUtc,
                 EndedAtUtc = DateTimeOffset.UtcNow,
@@ -1132,9 +1323,49 @@ internal sealed class CaptureService : IDisposable
                 Events = this.Events.ToArray(),
                 WaymarkFrames = this.waymarkTimeline.ToArray(),
                 ActionEffects = actionEffects,
+                ActionNames = actionNames.ToArray(),
                 TargetMarkerFrames = this.targetMarkerTimeline.ToArray(),
             };
         }
+        private void TryCaptureActionName(
+            uint actionId,
+            uint sourceEntityId,
+            long timestampMilliseconds)
+        {
+            if (this.actionNames.ContainsKey(actionId))
+            {
+                return;
+            }
+
+            if (this.actionNameRetries.TryGetValue(actionId, out var retry)
+                && (retry.AttemptCount >= MaximumActionNameResolutionAttempts
+                    || timestampMilliseconds < retry.NextAttemptTimestampMilliseconds))
+            {
+                return;
+            }
+
+            var resolved = this.resolveActionName(actionId, sourceEntityId);
+            if (resolved is { } actionName
+                && actionName.ActionId == actionId
+                && !string.IsNullOrWhiteSpace(actionName.Name)
+                && !actionName.Name.StartsWith("_rsv_", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(actionName.Language)
+                && Enum.IsDefined(actionName.Source))
+            {
+                this.actionNames.Add(actionId, actionName);
+                this.actionNameRetries.Remove(actionId);
+                return;
+            }
+
+            this.actionNameRetries[actionId] = new ActionNameRetryState(
+                retry.AttemptCount + 1,
+                timestampMilliseconds + ActionNameRetryIntervalMilliseconds);
+        }
+
+        private readonly record struct ActionNameRetryState(
+            int AttemptCount,
+            long NextAttemptTimestampMilliseconds);
+
 
         private bool TryCaptureWaymarks(long timestampMilliseconds, WaymarkReader waymarkReader)
         {
@@ -1252,6 +1483,15 @@ internal readonly record struct ReplaySourceSnapshot(
     PullRecord? LastCompletedPull,
     PullEndReason? LastCompletedEndReason = null,
     DebriefSummary? LastCompletedDebrief = null);
+
+internal readonly record struct FrameworkCaptureSample(
+    long CaptureEpoch,
+    bool InCombat,
+    CaptureSamplePreparation Preparation);
+
+internal readonly record struct FrameworkCaptureDecision(
+    bool SampleRequested,
+    FrameworkCaptureSample Sample);
 
 internal readonly record struct FrameRecordResult(
     bool Recorded,

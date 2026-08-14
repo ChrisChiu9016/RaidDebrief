@@ -18,6 +18,8 @@ public readonly record struct ResolvedActorState
 
     public required uint MaxHp { get; init; }
 
+    public required byte BarrierPercentage { get; init; }
+
     public required bool IsDead { get; init; }
 
     public required bool IsTargetable { get; init; }
@@ -194,6 +196,7 @@ public sealed class ActorStateResolver
                 HitboxRadius = previous.Sample.HitboxRadius,
                 CurrentHp = previous.Sample.CurrentHp,
                 MaxHp = previous.Sample.MaxHp,
+                BarrierPercentage = previous.Sample.BarrierPercentage,
                 IsDead = previous.Sample.IsDead,
                 IsTargetable = previous.Sample.IsTargetable,
                 IsOmnidirectional = previous.Sample.IsOmnidirectional,

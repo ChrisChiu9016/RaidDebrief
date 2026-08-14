@@ -44,13 +44,17 @@ Required Replay contracts:
 - Verify native Waymark icon identity, especially the non-contiguous `D=61247` and `1=61244` mapping. Letter icons must use a 1.25-world-unit radius, number icons a 2.3-world-unit edge, and native icon quads a shared `1.5x` transparent-inset compensation while the fallback retains the geometric world size; each image must remain centered, scale linearly with Map zoom, and retain the labeled fallback when the shared texture is unavailable.
 - Verify BattleNpc omnidirectionality resolves from either `BNpcBase.IsOmnidirectional` or status `3808`, never affects Player markers, is sampled as a discrete state, round-trips through JSON, and remains deterministic across forward and backward seeks. Current Captures select the recorded state; legacy Captures may use only the static BaseId fallback and must show a limitation warning.
 - Verify both embedded Target Ring PNGs and their exact dimensions. The confirmed prominent yellow circumference in both the 480×682 directional ring and 480×480 omnidirectional ring is `0.78` of the texture canvas half-width and must match the recorded world-space hitbox through Map zoom. Both textures must remain centered and face the recorded direction.
-- Verify the in-game Replay host always rejects explicit open requests while `InCombat=true`. With the default-enabled auto-close setting, visible／playing／loading Replay work must pause, cancel pending work, and close. With the setting disabled, an existing Replay window must remain visible but paused without advancing; enabling auto-close during combat must close it on the next UI update. Combat end must not request an automatic reopen.
-- Verify every newly completed `DutyWiped` generation offers one Replay prompt only after validation. A completion observed during combat must wait for the first out-of-combat update; a prompt already visible when combat starts must be dismissed without reopening. Disabling the persisted prompt setting must clear visible／queued prompts and skip generations completed while disabled; clear/manual/failed completion must not offer one.
-- Verify the allocation-free frame policy denies Draw while closed, denies Draw and Advance during auto-close-enabled combat, permits Draw without Advance during auto-close-disabled combat, and permits both only for visible out-of-combat playback.
+- Verify the in-game Replay host always rejects explicit open requests while `InCombat=true`. On the out-of-combat → in-combat edge, the default-enabled auto-close setting must pause, cancel pending work, and close visible／playing／loading Replay. With the setting disabled at that edge, an existing Replay window remains visible but paused without advancing. Changing the setting after combat has already begun must not synthesize another combat-entry action. Combat end must not request an automatic reopen.
+- Verify every newly completed `DutyWiped` generation offers one Debrief Summary only after validation and analysis. A completion observed during combat must wait for the first out-of-combat update; a Summary already visible when combat starts must be dismissed without reopening. Disabling the persisted Summary setting must clear visible／queued Summaries and skip generations completed while disabled; clear／manual／failed completion must not offer one.
+- Verify the allocation-free frame policy denies Draw while closed, keeps any intentionally open combat window drawable but never advances it, and permits Advance only for visible out-of-combat playback. Combat-entry auto-close behavior belongs to `ReplayCombatGate`, not `ReplayFramePolicy`.
 - Block session construction deterministically, then verify a newer source cancels it and Plugin/window disposal prevents completion adoption and future load starts.
 - Verify Focus de-emphasizes every non-selected Actor, zoomed follow clamps to the established safe Map pan boundary, an absent selected player preserves the last center, and manual arena drag cancels Focus. Death filtering and the allocation-free frame policy must not materialize Timeline collections per frame.
-- Verify Death correlation replays ordered target-resolved Damage／Heal from an HP anchor, identifies the virtual-HP crossing entry, calculates estimated HP-before-hit／Overkill, retains up to six captured incoming hits, and downgrades or reports unavailable when ActionEffect capability, identity, ordering, or HP evidence is missing. Confidence is ordinal and evidence-backed, never a probability or server-authored claim.
+- Verify Death correlation anchors on the last living HP observation and replays the latest ordered target-resolved Damage／Heal suffix that crosses zero, including effects whose callback timestamp precedes that HP sample. Verify Pull-local lag calibration uses only unique exact player HP transitions, falls back conservatively with sparse evidence, identifies the virtual-HP crossing entry, calculates estimated HP-before-hit／effective pool／Overkill, retains up to six captured incoming hits, and downgrades or reports unavailable when ActionEffect capability, identity, ordering, barrier absorption, observation lag, or HP evidence is uncertain. Confidence is ordinal and evidence-backed, never a probability or server-authored claim.
 - Verify Status identity excludes RemainingTime, normal countdown produces no transition churn, refresh／Param changes create `StatusRefreshed`, and Replay computes remaining time from the latest recorded timing anchor.
+- Verify Action-name capture stores one resolved Pull-local snapshot per observed Cast Action ID, prefers Lumina/Dalamud RSV then Client RSV then an entity-matched enemy CastBar, retries unresolved names without per-frame fallback caching, round-trips source/language metadata, and leaves legacy JSON load-compatible. Replay must prefer the recorded name over current-session localized data.
+- Verify `CaptureSamplingScheduler` takes the first sample immediately, follows an absolute monotonic 100 ms grid, records one real sample plus gap count after a hitch, rejects non-monotonic／overlapping preparations, and leaves cadence unchanged after cancellation.
+- Verify `FrameworkScanCoordinator` performs one shared scan when Capture owns the sample, refreshes an open Probe in a duty instance at no more than 10 Hz outside recording, performs no full scan for closed Probe＋idle Capture, retries a failed scan without advancing cadence, and allocates nothing on the warmed closed path.
+- Verify BarrierPercentage capture, feature-gated JSON compatibility, latest-at-or-before Replay resolution, Party／context presentation, and Death-correlation effective-pool behavior. Legacy Pulls without `BarrierState` must report unavailable rather than zero.
 
 Example expectation:
 
@@ -123,7 +127,7 @@ Validate:
 - Capture correctness
 - No combat stutter
 - Pull lifecycle
-- UI combat behavior: explicit opening remains rejected during combat. Verify the default-enabled setting pauses and closes a visible／playing Replay before the same UI update draws windows; disabling it keeps the existing window visible but paused throughout combat; re-enabling it during combat closes that window. Combat end must not reopen a closed Replay, and the next explicit open must still resolve the latest successful Pull.
+- UI combat behavior: explicit opening remains rejected during combat. On combat entry, verify the default-enabled setting pauses and closes visible／playing／loading Replay before the same UI update draws windows; disabling it beforehand keeps the existing window visible but paused. Toggling the setting after combat has begun must not retroactively hide that window. Combat end must not reopen a closed Replay, and the next explicit open must still resolve the latest successful Pull.
 - Post-Wipe Debrief Summary: repeat at least two Wipes and confirm each newly validated Pull produces one compact Summary after combat clears. Verify Pull ordinal, shared duration, objective Boss HP／unavailable state, first death, complete chronological death sequence including a raise／re-death, Wipe timestamp, and suggested range. The default-enabled setting must suppress both queued and visible Summaries without backfilling disabled Wipes. A visible Summary must dismiss before combat UI draws. One-click Replay must bind to the Summary's exact CaptureId／completion generation, reject a superseded source, open the normal combat-gated Runtime Replay paused at the suggested start, and display the suggested range.
 - Target Marker capture: all 17 slots are readable without capture errors; assign and remove at least one marker during a real Pull, then verify the finalized `TargetMarkerFrames` and its position above the same Actor in Replay.
 - Map canvas: load real Captures whose Lumina `Map` rows exercise distinct `SizeFactor` values, confirm the initial center corresponds to `(-OffsetX, -OffsetY)` and minimum zoom to `max(1, SizeFactor / 100)`, then verify different PC entry positions do not change framing, zoom cannot go below that value, pan cannot leave its initially visible region, Reset restores it, and zoom can reach 20x. A missing Map row must use complete-field Fit.
@@ -226,6 +230,14 @@ Measure at minimum:
 - Timeline scrubbing responsiveness
 
 Avoid premature optimization.
+
+For Capture sampling changes, separate:
+- lightweight every-update callback cost from full-scan callback cost;
+- recording, open-Probe idle, and closed-Probe idle paths;
+- callback allocated bytes and Gen 0／Gen 1 collections;
+- frame-time p50／p95／p99／maximum before and after the change.
+
+Do not claim “zero stutter” from code inspection or fixture seek speed. It requires comparative in-game Framework callback, GC, and frame-time evidence under equivalent scenarios.
 First establish a baseline, then optimize measured bottlenecks.
 
 ## 6. Completion Checklist for Core Changes
@@ -247,6 +259,11 @@ Before merging:
 6. Confirm timestamps are monotonic/coherent.
 7. Confirm the finalized in-memory `LastCompletedPull` is valid Replay input.
 8. If exported as a recorded fixture, confirm the fixture can also be loaded offline.
+9. Confirm a current-build Pull records `BarrierState` and `ActionNameSnapshot`; inspect representative barrier percentages and at least one resolved static／runtime-RSV／UI-observed Action name when the encounter supplies it.
+10. Confirm full scan count follows Capture／Probe demand rather than game FPS, first sample occurs on the combat-edge callback, average interval remains near 100 ms, and gap count does not create duplicate frames.
+11. Confirm rejected volatile Actor reads are counted and do not abort the remaining frame; investigate any repeated Actor slot failure or missing actor sequence.
+12. Compare Framework callback allocation／timing and GC behavior with the documented pre-change baseline before making a stutter-reduction claim.
+
 
 
 For automatic Pull lifecycle changes, also verify:

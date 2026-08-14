@@ -5,28 +5,39 @@ namespace RaidDebrief.Plugin.Tests;
 public sealed class ReplayCombatGateTests
 {
     [Fact]
-    public void CombatBlocksOpenWithoutCreatingAHideTransition()
+    public void OpeningDuringCombatDoesNotCreateAnotherCloseAction()
     {
         var gate = new ReplayCombatGate();
-
-        var decision = gate.Observe(
-            inCombat: true,
-            isReplayOpen: false,
+        gate.Observe(
+            inCombat: false,
+            isReplayOpen: true,
             isPlaying: false,
             hasPendingLoad: false,
             closeReplayOnCombatStart: true);
 
-        Assert.False(decision.CanOpen);
-        Assert.Equal(ReplayCombatAction.None, decision.Action);
+        var combatStarted = gate.Observe(
+            inCombat: true,
+            isReplayOpen: true,
+            isPlaying: false,
+            hasPendingLoad: false,
+            closeReplayOnCombatStart: true);
+        var reopenedDuringCombat = gate.Observe(
+            inCombat: true,
+            isReplayOpen: true,
+            isPlaying: false,
+            hasPendingLoad: true,
+            closeReplayOnCombatStart: true);
+
+        Assert.Equal(ReplayCombatAction.HideAndPause, combatStarted.Action);
+        Assert.Equal(ReplayCombatAction.None, reopenedDuringCombat.Action);
         Assert.True(gate.InCombat);
-        Assert.False(gate.CanOpen);
     }
 
     [Theory]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]
     [InlineData(false, false, true)]
-    public void CombatHidesAnyVisiblePlayingOrLoadingReplayWhenEnabled(
+    public void CombatEntryHidesVisiblePlayingOrLoadingReplayWhenEnabled(
         bool isReplayOpen,
         bool isPlaying,
         bool hasPendingLoad)
@@ -46,18 +57,23 @@ public sealed class ReplayCombatGateTests
             hasPendingLoad,
             closeReplayOnCombatStart: true);
 
-        Assert.False(decision.CanOpen);
         Assert.Equal(ReplayCombatAction.HideAndPause, decision.Action);
     }
 
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]
-    public void DisabledAutoCloseKeepsWindowButSuspendsCombatWork(
+    public void DisabledAutoCloseKeepsWindowButSuspendsWorkOnCombatEntry(
         bool isPlaying,
         bool hasPendingLoad)
     {
         var gate = new ReplayCombatGate();
+        gate.Observe(
+            inCombat: false,
+            isReplayOpen: true,
+            isPlaying,
+            hasPendingLoad,
+            closeReplayOnCombatStart: false);
 
         var decision = gate.Observe(
             inCombat: true,
@@ -66,28 +82,11 @@ public sealed class ReplayCombatGateTests
             hasPendingLoad,
             closeReplayOnCombatStart: false);
 
-        Assert.False(decision.CanOpen);
         Assert.Equal(ReplayCombatAction.Pause, decision.Action);
     }
 
     [Fact]
-    public void DisabledAutoCloseLeavesAnAlreadyPausedWindowVisible()
-    {
-        var gate = new ReplayCombatGate();
-
-        var decision = gate.Observe(
-            inCombat: true,
-            isReplayOpen: true,
-            isPlaying: false,
-            hasPendingLoad: false,
-            closeReplayOnCombatStart: false);
-
-        Assert.False(decision.CanOpen);
-        Assert.Equal(ReplayCombatAction.None, decision.Action);
-    }
-
-    [Fact]
-    public void EnablingAutoCloseDuringCombatHidesTheVisibleWindow()
+    public void EnablingAutoCloseMidCombatDoesNotHideWindow()
     {
         var gate = new ReplayCombatGate();
         gate.Observe(
@@ -104,53 +103,33 @@ public sealed class ReplayCombatGateTests
             hasPendingLoad: false,
             closeReplayOnCombatStart: true);
 
-        Assert.Equal(ReplayCombatAction.HideAndPause, decision.Action);
+        Assert.Equal(ReplayCombatAction.None, decision.Action);
     }
 
     [Fact]
-    public void CombatEndAllowsExplicitOpenWithoutRequestingAutomaticReopen()
+    public void LeavingAndReenteringCombatCreatesOneNewCloseAction()
     {
         var gate = new ReplayCombatGate();
-        var hidden = gate.Observe(
+        gate.Observe(
             inCombat: true,
             isReplayOpen: true,
-            isPlaying: true,
-            hasPendingLoad: true,
+            isPlaying: false,
+            hasPendingLoad: false,
             closeReplayOnCombatStart: true);
-
         var combatEnded = gate.Observe(
             inCombat: false,
-            isReplayOpen: false,
+            isReplayOpen: true,
             isPlaying: false,
             hasPendingLoad: false,
             closeReplayOnCombatStart: true);
-
-        Assert.Equal(ReplayCombatAction.HideAndPause, hidden.Action);
-        Assert.True(combatEnded.CanOpen);
-        Assert.Equal(ReplayCombatAction.None, combatEnded.Action);
-        Assert.False(gate.InCombat);
-        Assert.True(gate.CanOpen);
-    }
-
-    [Fact]
-    public void RepeatedCombatObservationDoesNotCreateWorkAfterReplayIsHidden()
-    {
-        var gate = new ReplayCombatGate();
-        gate.Observe(
+        var combatRestarted = gate.Observe(
             inCombat: true,
             isReplayOpen: true,
-            isPlaying: true,
-            hasPendingLoad: false,
-            closeReplayOnCombatStart: true);
-
-        var decision = gate.Observe(
-            inCombat: true,
-            isReplayOpen: false,
             isPlaying: false,
             hasPendingLoad: false,
             closeReplayOnCombatStart: true);
 
-        Assert.False(decision.CanOpen);
-        Assert.Equal(ReplayCombatAction.None, decision.Action);
+        Assert.Equal(ReplayCombatAction.None, combatEnded.Action);
+        Assert.Equal(ReplayCombatAction.HideAndPause, combatRestarted.Action);
     }
 }

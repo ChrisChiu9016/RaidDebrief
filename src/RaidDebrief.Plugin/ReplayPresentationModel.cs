@@ -77,14 +77,22 @@ internal sealed class ReplayPresentationModel
             }
         }
 
+        // Role order keeps the same seat for a role across pulls. The recorded
+        // PartyIndex is Dalamud's raw group array, which is neither the in-game
+        // party list order nor stable between pulls, so it only breaks ties.
         partyActors.Sort(static (left, right) =>
         {
-            if (left.PartyIndex is { } leftPartyIndex && right.PartyIndex is { } rightPartyIndex)
+            var result = JobIconResources.GetRoleOrder(left.ClassJobId)
+                .CompareTo(JobIconResources.GetRoleOrder(right.ClassJobId));
+            if (result != 0)
             {
-                return leftPartyIndex.CompareTo(rightPartyIndex);
+                return result;
             }
 
-            return left.StableActorId.CompareTo(right.StableActorId);
+            result = (left.PartyIndex ?? int.MaxValue).CompareTo(right.PartyIndex ?? int.MaxValue);
+            return result != 0
+                ? result
+                : left.StableActorId.CompareTo(right.StableActorId);
         });
 
         var correlations = new DeathEventCorrelator().Analyze(record);

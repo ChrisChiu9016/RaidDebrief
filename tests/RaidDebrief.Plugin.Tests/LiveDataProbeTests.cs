@@ -15,6 +15,18 @@ public sealed class LiveDataProbeTests
     }
 
     [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData(" ", false)]
+    [InlineData("Boss", true)]
+    public void IncompleteActorNameIsSkippedBeforeInvariantGuard(
+        string? name,
+        bool expected)
+    {
+        Assert.Equal(expected, LiveDataProbe.IsRecordableActorName(name));
+    }
+
+    [Theory]
     [InlineData(false, false, false, false)]
     [InlineData(true, false, false, true)]
     [InlineData(false, true, false, true)]
@@ -28,6 +40,21 @@ public sealed class LiveDataProbeTests
         Assert.Equal(
             expected,
             LiveDataProbe.IsBoundByDuty(boundByDuty, boundByDuty56, boundByDuty95));
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public void ProbeWindowRefreshRequiresDutyInstance(
+        bool probeRefreshRequested,
+        bool isInDutyInstance,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            LiveDataProbe.ShouldRefreshProbe(probeRefreshRequested, isInDutyInstance));
     }
 
     [Fact]
@@ -54,5 +81,35 @@ public sealed class LiveDataProbeTests
             ObjectKind.Pc,
             baseIsOmnidirectional: true,
             [directionalDisregard]));
+    }
+
+    [Fact]
+    public void ActorNameCacheUsesObjectTableSlotAndGameObjectIdentity()
+    {
+        var cache = new ActorNameCache(4);
+
+        Assert.Equal(4, cache.Capacity);
+        Assert.False(cache.TryGet(2, 100, out _));
+
+        cache.Store(2, 100, "First");
+        Assert.True(cache.TryGet(2, 100, out var cached));
+        Assert.Equal("First", cached);
+
+        Assert.False(cache.TryGet(2, 200, out _));
+        cache.Store(2, 200, "Replacement");
+        Assert.True(cache.TryGet(2, 200, out cached));
+        Assert.Equal("Replacement", cached);
+    }
+
+    [Fact]
+    public void ActorNameCacheSurvivesOutputDestinationCompaction()
+    {
+        var cache = new ActorNameCache(4);
+        cache.Store(1, 101, "Front");
+        cache.Store(3, 303, "Back");
+
+        Assert.True(cache.TryGet(3, 303, out var cached));
+        Assert.Equal("Back", cached);
+        Assert.False(cache.TryGet(1, 303, out _));
     }
 }

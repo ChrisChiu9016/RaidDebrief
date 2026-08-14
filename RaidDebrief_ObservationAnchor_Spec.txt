@@ -1,0 +1,299 @@
+Raid Debrief：死亡關聯觀測定錨 實作規格與驗證狀態
+原始整理：2026-08-12
+狀態更新：2026-08-14
+狀態：Algorithm v2 已實作並通過自動化／離線回歸；最新 DLL 的實機死亡案例仍待驗證
+
+目前實作對照（本段優先於下方原始實作指令）：
+
+1. DeathEventCorrelator.CurrentAlgorithmVersion = 2。
+2. 已改用死亡轉換前最後一筆存活 HP 觀測定錨，並以效果在錄製中的
+   有序位置選擇「最後一段可跨零」的 Damage／Heal suffix；早於 anchor
+   sample timestamp、但仍屬於觀測延遲窗的效果不再被時間戳排除。
+3. 已以每份 Pull 的乾淨單一效果 HP transition 校準延遲門檻；有效樣本
+   少於 3 筆時使用 1000 ms 保守 fallback，門檻上限 2000 ms。
+4. BarrierState 已納入有效承傷池與 Overkill；無法對帳的護盾吸收仍標示
+   BarrierAbsorptionUnverified，且不能維持 High confidence。
+5. 已加入兩個直接回歸：
+   UsesLastLivingHpAndEffectPositionWhenHpObservationLags
+   IncludesEffectsBeforeLastLivingFrameTimestamp。
+6. 目前 DeathEventCorrelation 不公開原提案的
+   HpObservationLagMilliseconds／AnchorSampleTimestampMilliseconds；
+   校準值僅作為內部 threshold。若仍需要 UI／診斷可觀測性，這是明確的
+   未實作項，不得由現有欄位推測。
+7. 原指令要求「不改 PullRecord schema」，但同批正式 Capture 功能已新增
+   BarrierState／ActionNameSnapshot；舊 JSON 仍由 feature gate 相容載入。
+8. 最新驗證基準：Core 99／99、UI 4／4、Plugin 169／169；三份 repository
+   recorded fixtures 均完成全 Pull Replay 與 20,000 deterministic seeks。
+
+下方第四至第七節保留原始設計與驗收意圖；與本段不同處以本段及
+docs/ARCHITECTURE.md、docs/TESTING.md、docs/TEST_RECORDS.md 為準。
+
+
+
+═══════════════════════════════════════════════════════════════════
+一、背景與實測證據
+═══════════════════════════════════════════════════════════════════
+
+FF14 不提供擊殺欄位，DeathEventCorrelator 以「HP 取樣 + Action Effect
+封包」重建致命一擊。兩者的時間基準不一致：
+
+  Action Effect 封包時間戳：準確
+  HP／護盾取樣：延遲 356 – 910 ms（實測，平均 687 ms）
+
+延遲來源是客戶端 object table 的更新時機，HP 與 BarrierPercentage 寫在
+同一次掃描，因此兩者延遲相同。
+
+實測方法與數據（testdata 與 pluginConfigs 內的錄製）：
+
+1. 無盾命中，HP 掉幅與封包金額完全相等
+   sid7 t=2693  金額 81,888  HP 325,247 → 243,359  延遲 811 ms
+
+2. 延遲分布（7 筆乾淨事件）
+   最小 356 ms／最大 910 ms／平均 687 ms
+   現行 HpLagThresholdMilliseconds = 250，7/7 全數超過
+
+3. 定錨差異（DMU fixture，9 筆可關聯死亡）
+   時間戳定錨 vs 觀測定錨取到不同樣本：7 / 9
+   最大偏差：113,885 HP
+   時間戳定錨最遠落在死亡前 1.8 秒（五筆同時落在 t=563800）
+
+   死亡      時間戳anchor HP   觀測anchor HP    差
+   564804    140,076          179,205          +39,129
+   565407    146,071           56,018          −90,053
+   565500    152,729           38,844         −113,885
+   565607    148,242           59,583          −88,659
+   566102    325,090          280,355          −44,735
+
+
+═══════════════════════════════════════════════════════════════════
+二、現行實作的兩個缺陷
+═══════════════════════════════════════════════════════════════════
+
+DeathEventCorrelator.AnalyzeDeath：
+
+    var firstDeltaTimestamp = deltas.Count == 0
+        ? simulationStart
+        : deltas[0].Event.TimestampMilliseconds;
+    var anchor = FindLastHpSampleAtOrBefore(record, actorId, firstDeltaTimestamp);
+    ...
+    foreach (var delta in deltas)
+    {
+        if (delta.Event.TimestampMilliseconds < anchor.Value.TimestampMilliseconds)
+        {
+            continue;
+        }
+        ...
+    }
+
+缺陷 1：anchor 取自「回溯窗內第一筆傷害之前」，可能落在死亡前 1.8 秒，
+且該樣本的內容還要再往前 L 毫秒。起始 HP 與死亡當下的真實 HP 差距可達
+十萬以上。
+
+缺陷 2：落在 (T_anchor − L, T_anchor) 區間的傷害同時被兩邊漏掉——
+被 continue 跳過（時間戳早於 anchor），也不在 anchor 的 HP 內容裡
+（內容反映更早的狀態）。虛擬 HP 起始偏高，過晚歸零，致命一擊被歸給
+更後面的一擊。
+
+
+═══════════════════════════════════════════════════════════════════
+三、目標
+═══════════════════════════════════════════════════════════════════
+
+用「效果在資料裡出現的位置」定錨，取代「用時間戳比對」定錨。
+
+核心理由：HP 取樣雖有延遲，但延遲對同一次掃描內的所有欄位一致。因此
+「HP 開始變化的前一筆取樣」是與該變化最接近的觀測，且不需要事先知道
+延遲有多大。
+
+附帶目標：以錄製自身資料校準延遲，取代寫死的 250 ms。
+
+
+═══════════════════════════════════════════════════════════════════
+四、實作步驟
+═══════════════════════════════════════════════════════════════════
+
+步驟 1：每份錄製校準一次 HP 觀測延遲
+
+新增純函式（建議放 DeathEventCorrelator，internal static 供測試）：
+
+    internal static long CalibrateHpObservationLag(PullRecord record)
+
+演算法：
+  a. 對每一筆 kind == Damage 且 Amount > 0 的 Action Effect entry，
+     取其 TargetStableActorId 與封包時間戳 D。
+  b. 找該 actor 在 D 之前最後一筆 HP 取樣，記其 HP 為 H0。
+  c. 往後掃描，找第一筆 HP < H0 的取樣，時間戳 T。
+  d. 若 (D, T] 之間存在該 actor 的其他 Damage 或 Heal entry，捨棄此樣本
+     （會污染歸屬）。
+  e. 若 H0 − HP(T) 不等於該筆金額，捨棄（表示區間內有未擷取的效果）。
+  f. 收集所有 (T − D)，取中位數。
+
+回傳：
+  - 有效樣本 >= 3 筆 → 中位數，clamp 到 [0, 2000]
+  - 否則 → DefaultHpObservationLagMilliseconds（建議 700，需註明為
+    實測平均值 687 ms 取整）
+
+此值必須可從外部觀察（見步驟 4）。
+
+步驟 2：改用觀測定錨
+
+在 AnalyzeDeath 內，取代現行 anchor 選取：
+
+  a. 找死亡轉換取樣：第一筆 TimestampMilliseconds >= deathTimestamp
+     且 (IsDead || CurrentHp == 0) 的該 actor 樣本，時間戳記為 T_obs。
+     找不到時退回現行行為並標示 limitation。
+  b. anchor = T_obs 之前最後一筆該 actor 的存活樣本（時間戳 T_anchor）。
+  c. anchor 的有效時刻 = T_anchor − CalibratedLag。
+
+步驟 3：改用有效時刻篩選 deltas
+
+將
+
+    if (delta.Event.TimestampMilliseconds < anchor.Value.TimestampMilliseconds)
+
+改為
+
+    if (delta.Event.TimestampMilliseconds <= effectiveAnchorTimestamp)
+
+其中 effectiveAnchorTimestamp = T_anchor − CalibratedLag。
+
+這同時修掉缺陷 2：落在延遲窗內的傷害不再被漏掉。
+
+步驟 4：暴露診斷資訊
+
+DeathEventCorrelation 新增：
+
+    /// <summary>本份錄製校準出的 HP 觀測延遲。</summary>
+    public long HpObservationLagMilliseconds { get; init; }
+
+    /// <summary>定錨所用的取樣時間戳。</summary>
+    public long AnchorSampleTimestampMilliseconds { get; init; }
+
+步驟 5：修正恆亮的 limitation 門檻
+
+  a. HpLagThresholdMilliseconds = 250 是寫死值，實測 7/7 觸發，已失去
+     鑑別力。改為以校準值為基準，例如 CalibratedLag * 2，使該旗標恢復
+     「這次特別異常」的語意。
+  b. PeriodicHpEffectsNotObserved 目前在 AnalyzeDeath 開頭無條件設定，
+     每筆死亡必定帶有。這是所有 10 Hz 錄製的共同性質，不是個別死亡的
+     缺陷。維持設定，但在 UI 上與偶發旗標分開呈現（見步驟 6）。
+
+步驟 6：UI
+
+ReplayWindow 死亡面板：
+
+  a. 將 Limitations 從 tooltip 移到面板內，僅在有偶發旗標時顯示。
+  b. 常駐旗標（PeriodicHpEffectsNotObserved、以及校準後仍觸發的
+     HpObservationLag）留在 tooltip。
+  c. 偶發旗標對應的顯示文字，只陳述「未觀測到什麼」，不寫後果推論：
+
+     ActionEffectCaptureUnavailable  Action Effect 未擷取
+     UnexplainedHpDelta             HP 變化量與已記錄傷害不吻合
+     MultipleCandidateHits          視窗內有多筆候選傷害
+     AmbiguousEffectOrdering        同一時間戳的效果順序未定
+     ActorIdentityUnresolved        Actor 身分未解析
+     BarrierAbsorptionUnverified    護盾吸收量與傷害金額未對帳
+
+  d. Evidence 維持在 tooltip。
+
+
+═══════════════════════════════════════════════════════════════════
+五、不得更動的範圍
+═══════════════════════════════════════════════════════════════════
+
+1. 不得改動 ActorStateSample、PositionFrame、PullRecord、ObservedEvent
+   的 JSON schema。本次變更全部發生在分析層。
+
+2. 不得改動 DeathBarrierObservation 的判定邏輯。它目前只讀「死前最後
+   一筆存活取樣的 BarrierPercentage」，這是刻意的：死亡會一次剝除所有
+   狀態，statusRemainingTime 在死亡情境無法區分「被消耗」與「到期」。
+   實測佐證：某筆死亡在同一毫秒掉了 10 個狀態，剩餘時間 0.838 – 24.632 秒。
+
+3. 不得把護盾吸收量加進傷害金額的對帳。該帳目尚未解決，維持
+   BarrierAbsorptionUnverified 標示。
+
+4. 不得移除既有的 Confidence 分級與 Evidence 旗標。
+
+5. 不得引入任何新的推論性顯示（例如「需要多少減傷才能存活」）。
+   本專案原則：僅呈現客觀事實；已標示為 Estimated 的推估值可保留，
+   但不得新增。
+
+
+═══════════════════════════════════════════════════════════════════
+六、原驗收條件與目前狀態
+═══════════════════════════════════════════════════════════════════
+
+功能：
+
+1. 對 DMU fixture 的 9 筆可關聯死亡，anchor 取樣時間戳與死亡時間戳的
+   間隔中位數應小於 600 ms（現行為最遠 1.8 秒）。
+2. 單一命中致死的情況下，EstimatedHpBeforeHit 應等於死前最後一筆存活
+   取樣的 CurrentHp（即觀測值，非模擬值）。
+3. CalibrateHpObservationLag 對 00b3eab0 fixture 回傳值應落在
+   [350, 950] 區間內。
+4. HpObservationLag limitation 不再於每筆死亡觸發。
+
+回歸：
+
+5. x64 Debug solution build 成功；2026-08-14 已完成並於正確 DLL 路徑熱重載。
+6. 現有測試全數通過（目前基準：Core 99／Plugin 169／UI 4＝272）。
+7. 三份 repository recorded fixtures 均可載入與完整 Replay。
+8. JSON round-trip 與 legacy feature gate 相容測試通過。
+9. RaidDebrief.Core 仍不依賴 Dalamud／Lumina。
+
+
+═══════════════════════════════════════════════════════════════════
+七、必要測試
+═══════════════════════════════════════════════════════════════════
+
+1. CalibrateHpObservationLag
+   - 建構已知延遲的合成錄製，斷言回傳該延遲
+   - 有效樣本不足 3 筆時回傳預設值
+   - 區間內有其他傷害或治療的樣本被正確排除
+   - 回傳值 clamp 在 [0, 2000]
+
+2. 觀測定錨
+   - 一筆死亡，死前 HP 平穩：anchor 應為死亡轉換前一筆，
+     EstimatedHpBeforeHit 等於該取樣的 CurrentHp
+   - 延遲窗內存在傷害：該傷害必須被納入模擬（守住缺陷 2）
+     構造方式：傷害封包時間戳早於 T_anchor 但晚於 T_anchor − Lag
+   - 對照組：同一份資料用舊的時間戳定錨會得到不同的致命一擊，
+     新測試必須能區分兩者
+
+3. 不得回歸的既有行為
+   - 護盾判定不因 statusRemainingTime 改變
+     （既有測試 StatusDurationRemainingDoesNotChangeTheBarrierVerdict）
+   - 無 BarrierState 的錄製仍回報 NotRecorded
+
+
+═══════════════════════════════════════════════════════════════════
+八、已知未解，不得宣稱已解決
+═══════════════════════════════════════════════════════════════════
+
+1. 護盾吸收與封包金額的帳目未對上。實測顯示護盾狀態在命中時被移除，
+   但 HP 仍掉了完整的封包金額。三種可能（金額已扣盾／盾被未擷取的
+   傷害吃掉／金額只是部分回報）目前無法區分。需要一筆「帶盾陣亡且
+   傷害僅略高於 HP+盾」的錄製才能定案。
+
+2. 多筆命中落在同一延遲窗內時（團滅叢集），效果落點無法歸屬給單一
+   命中。觀測定錨改善起始 HP，但不解決歸屬問題。該情況必須維持
+   MultipleCandidateHits 標示。
+
+3. 本次校準假設延遲在單一錄製內大致穩定。實測範圍 356–910 ms 顯示
+   有相當離散度。若日後發現延遲隨場景或負載大幅變動，中位數校準需
+   改為分段校準。
+
+
+═══════════════════════════════════════════════════════════════════
+九、獨立已知項目
+═══════════════════════════════════════════════════════════════════
+
+1. 時間軸死亡標記仍只在時間戳完全相等時合併。
+   位置：ReplayWindow.DrawTimelineControl。
+   團滅死亡若時間戳相近但不相等，仍可能形成重疊標記；若要修正，應以
+   顯示像素距離分組，並另建可觀測 UI 契約與測試。
+
+2. 「未錄製且 Probe 關閉仍全速掃描」已於 2026-08-14 解決。
+   FrameworkScanCoordinator 現在只在 Capture sample 或開啟 Probe 的
+   10 Hz refresh 需要時執行完整掃描；closed Probe＋idle Capture 的 warmed
+   path 有 0-allocation 自動化回歸。

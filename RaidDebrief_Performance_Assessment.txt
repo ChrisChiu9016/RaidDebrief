@@ -1,0 +1,245 @@
+Raid Debrief 效能與 10 Hz 資料提取：基準、實作與待驗證結論
+原始整理：2026-08-12；狀態更新：2026-08-14
+狀態：10 Hz 完整資料提取與配置衛生已實作；比較式實機 frame-time／GC profiling 尚未完成。
+本文保留修改前量測作為 baseline。標為「原流程」的敘述不代表目前程式。
+
+
+一、整體結論
+
+1. Raid Debrief 會帶來額外 CPU、記憶體與少量 GPU 資源使用，但目前一般 Runtime 路徑不至於造成明顯的整體系統負擔。
+2. 正式寫入 PullRecord 的位置、HP 與 Actor 狀態採樣率目前仍是 10 Hz，即每 100 ms 一次，並沒有被改高。
+3. 目前主要的效能改善空間不是降低記錄採樣率，而是避免在每次 Framework.Update 都完整讀取 PartyList、ObjectTable 與每個角色的 StatusList。
+4. Action Effect、Duty Wipe、Duty Complete 等資料是事件驅動，不受 10 Hz PositionFrame 採樣限制。
+5. Runtime Replay 本身負擔低；大型 Developer/Test JSON 的匯入與匯出才有明顯的瞬間記憶體壓力。
+
+二、目前實際執行方式
+
+目前流程：
+
+Framework.Update（每幀）
+  ├─ 讀取輕量 ClientState／Condition／Territory／Map／Instance
+  ├─ CaptureService.BeginFrameworkUpdate 更新 Pull lifecycle
+  ├─ CaptureSamplingScheduler 判斷 active Pull 是否需要真實樣本
+  └─ FrameworkScanCoordinator 僅在需要時：
+       ├─ 讀取 PartyList
+       ├─ 掃描 ObjectTable
+       ├─ 每個 Actor 取得一次 StatusList
+       └─ CaptureService.SubmitFrameworkSample
+            ├─ 寫入 PositionFrame／Cast／Status transition
+            └─ 讀取 Waymark／Target Marker
+
+因此目前必須區分：
+
+- 正式 PositionFrame／Actor state：10 Hz。
+- Party／Actor／Status 完整提取：錄製時 10 Hz；未錄製、Probe 開啟且位於
+  duty instance 時最多 10 Hz；其他未錄製狀態不執行。
+- Pull lifecycle／instance edge：每個 Framework.Update。
+- Action Effect：native hook 事件驅動。
+- Duty Wipe／Complete：IDutyState 事件驅動。
+- Replay combat gate／Debrief gate：每個 UI Draw。
+
+第一個 Pull 樣本與 StartRecording 位於同一個 Framework callback。低 FPS
+只寫入一個當下樣本並增加 Gap count，不補寫不存在的歷史 Frame。
+
+三、實際量測基準
+
+使用 testdata/recorded/20260810_DMU.json：
+
+- Pull 時長：約 588.3 秒（約 9.8 分鐘）
+- Position Frames：5,884
+- Actor State Samples：330,916
+- 每 Frame 平均 Actor：約 56.24
+- 記錄過的 Actor：173
+- Events：7,649
+- Action Effects：4,185
+- JSON 檔案大小：約 106.9 MiB
+
+採樣結果符合約 10 Hz：588.3 秒產生 5,884 Frames，平均約每 100 ms 一個 Frame。
+
+四、Runtime 記憶體與 Replay 成本
+
+同一份 9.8 分鐘真實 Pull 的離線量測：
+
+- PullRecord 額外 Managed Memory：約 22.8 MiB
+- 平均資料成長：約 39.7 KiB／秒
+- 依目前資料密度線性推算 15 分鐘 Pull：約 34.9 MiB（推算值，實際取決於 Actor、Status 與 Action Effect 密度）
+- 建立 Replay 索引額外：約 5.21 MiB
+- ReplaySession 建立：約 9 至 10 ms，且 Runtime 由背景工作建立
+- Validator：約 7 ms
+- Debrief Analyzer：約 6 至 7 ms
+
+20,000 次隨機 Replay Seek：
+
+- 平均約 0.0239 ms／次
+- 每次 Seek 配置 0 bytes
+
+結論：Runtime Replay 與 Timeline scrubbing 很輕；長 Pull 的記憶體使用呈線性成長，但目前屬於可控範圍。
+
+五、大型 Developer/Test JSON 風險
+
+現行 CaptureJson.Load 使用 File.ReadAllText，會先建立完整 UTF-16 字串，再反序列化。
+現行 Serialize 也會先建立完整 JSON 字串，再寫入檔案。
+
+對約 106.9 MiB 的真實錄製，量測結果為：
+
+現行載入：
+- 約 0.84 至 0.85 秒
+- 累計配置約 1.06 GB
+- Managed Heap 增加約 561 MB
+- Process Private Memory 一度接近 1 GB
+
+現行序列化：
+- 約 639 ms
+- 累計配置約 503 MB
+- 大型序列化字串存在時，Managed Heap 約 552 MB
+
+Stream-based 載入實驗：
+- 約 0.72 至 0.75 秒
+- 累計配置約 73.5 MB
+- 實際保留的 PullRecord 約 22.8 MiB
+
+這個問題主要存在於明確的 Developer/Test 匯入／匯出流程，不是一般自動 Runtime Replay 的必要路徑。
+
+六、Dalamud 資訊讀取是否會造成負擔
+
+讀取 Dalamud／衛月資訊本身通常不是高成本操作。插件與遊戲在同一程序內，主要是讀取服務包裝的遊戲狀態或 native memory，不會因讀取 ObjectTable 而產生額外網路流量，也不會另外啟動常駐程序。
+
+真正影響負擔的是：
+
+1. 掃描頻率。
+2. ObjectTable 的 slot 與有效 Actor 數量。
+3. 每個 BattleChara 的 StatusList 數量。
+4. 是否在遊戲 Framework thread 配置大量物件。
+5. callback 是否占用過多 frame budget。
+6. 是否同時安裝多個做相似全表掃描的插件。
+
+Raid Debrief 已將完整 Actor／Status 提取降到需求驅動的 10 Hz，並移除
+closed Probe＋idle Capture 的無消費者掃描。下一個效能問題不能再由舊
+baseline 推定，必須以修改後 callback allocation、GC 與 frame-time 實測定位。
+
+七、已採用的 10 Hz 提取設計
+
+目前實作將昂貴的 Party／Actor／Status 提取維持在與正式記錄相同的 10 Hz，
+不降低 Replay 資料精度；輕量 lifecycle 與 combat gate 仍逐更新執行。
+
+目前流程：
+
+Framework.Update（每幀）
+  ├─ 讀取 ClientState／Condition
+  ├─ 更新 Pull lifecycle
+  ├─ 準備或拒絕本次 Capture sample
+  └─ 若 Capture／Probe 需要完整掃描：
+       ├─ 讀取 PartyList
+       ├─ 掃描 ObjectTable／StatusList
+       ├─ 提交 PositionFrame
+       └─ 讀取 Waymark／Target Marker
+
+必須保持每個 Framework.Update 執行的資料：
+
+- InCombat
+- BoundByDuty／BoundByDuty56／BoundByDuty95
+- Territory／Map／Instance
+- Pull 開始與結束判定
+- 三秒脫戰 debounce
+- Instance 離開判定
+- Replay 戰鬥中暫停／關閉
+- Debrief 顯示時機
+
+不能將整個 OnFrameworkUpdate 降為 10 Hz，否則 Pull lifecycle 和 UI combat gate 會增加最多約 100 ms 的反應延遲。
+
+八、對現有功能的實際契約
+
+- 位置 Replay：正式記錄仍為 10 Hz。
+- HP／護盾／死亡狀態：與 PositionFrame 同步保存。
+- Cast／Status 輪詢事件：由已接受的正式 Frame 處理。
+- Waymark／Target Marker：由已接受的正式 Frame 處理。
+- Action Effect：維持事件驅動。
+- Duty Wipe／Complete：維持事件驅動。
+- Pull lifecycle／instance exit：逐 Framework.Update。
+- Replay combat action：維持 UI 更新頻率，未移入 100 ms gate。
+- Probe Actor 顯示：最多約 100 ms 舊。
+- 完整掃描頻率已下降；CPU／GC／frame-time 的實際改善幅度仍待比較式實機 profiling。
+九、10 Hz 提取實作必須處理的邊界
+
+1. Pull 開始立即取樣
+
+偵測到 InCombat=false → true 後，必須強制在同一個 Framework callback 提取 Actor 並建立第一個樣本，不能固定等待下一個 100 ms tick，否則會丟失 Pull 最前面最多 100 ms 的狀態。
+
+2. 使用單調時鐘
+
+應以 Stopwatch elapsed time 計算下一個 100 ms 邊界，不應靠逐幀累加 delta time，避免低 FPS 或 frame hitch 造成取樣漂移。
+
+3. 低 FPS 不補寫假樣本
+
+若某次 Framework callback 延遲超過 100 ms，只擷取一次當下狀態並增加 Gap count；不能連續補寫數個內容相同的歷史 Frame。
+
+4. 手動擷取維持相同行為
+
+Developer/Test 手動擷取也必須在開始時立即取第一個樣本，之後維持 10 Hz，並繼續不受 instance gate 限制。
+
+5. Probe 視窗
+
+保守策略：
+- 錄製中：10 Hz 更新 Actor snapshot。
+- 未錄製、Probe 視窗開啟且位於 duty instance：10 Hz 更新。
+- 未錄製且 Probe 視窗關閉：不掃描 Actor／Status。
+
+6. 取樣排程必須只有一個 owner
+
+目前 100 ms gate 位於 ActiveCapture.TryRecordFrame，而完整資料已經在 LiveDataProbe 提取完畢。優化時需要把「本幀是否需要 Actor snapshot」的決策提前，但不應讓 LiveDataProbe 與 CaptureService 各自維護一套可能不同步的計時器。
+
+較安全的方向是由 CaptureService／生命週期協調層回傳明確決策，例如：
+
+- StartRecording
+- Finalize
+- CaptureActorsNow
+
+LiveDataProbe 只在 CaptureActorsNow 時掃描 Party／ObjectTable／StatusList。
+
+十、實作後驗證標準
+
+1. 10 秒 Pull 約產生 100 個 Position Frames。
+2. combat-edge callback 立即產生首樣本。
+3. AverageSampleIntervalMilliseconds 維持約 100 ms。
+4. 低 FPS 時 Gap count 正確，不補寫假樣本。
+5. Action Effect 數量與時序不受影響。
+6. Waymark／Target Marker transition 維持約 100 ms 精度。
+7. 三秒 debounce 行為相同。
+8. Instance exit 在下一次 Framework.Update 立即 finalize。
+9. Replay combat action 不增加 100 ms 延遲。
+10. Probe 視窗依照既定策略更新。
+11. closed Probe＋idle Capture 不執行完整掃描。
+12. x64 Debug solution build 與 post-build hot reload 成功。
+13. Core、Plugin、UI 測試全部通過。
+14. 真實 Pull 與既有 synthetic／recorded fixtures 可載入及 Replay。
+15. RaidDebrief.Core 不依賴 Dalamud。
+16. Framework callback allocation／GC／frame-time 必須有修改前後對照，才可宣稱 stutter 改善。
+
+十一、目前驗證狀態
+
+- x64 Debug solution build：成功；正確 x64 DLL 已於 build 後熱重載。
+- Core tests：99／99 通過。
+- Plugin tests：169／169 通過。
+- UI tests：4／4 通過。
+- 合計：272／272 通過。
+- CaptureSamplingScheduler／FrameworkScanCoordinator 邊界與 warmed closed-path
+  0-allocation 回歸：通過。
+- 三份 repository recorded fixtures：完整離線驗證成功，各完成 20,000 seeks，
+  平均 0.01293–0.02354 ms／seek，0 bytes／seek。
+- Core 無 Dalamud／Lumina 依賴：通過。
+- 最新 DLL post-reload Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` 已於
+  約 13.9 分鐘後以 8,341 frames／14,156 events／6,262 Action Effects 完成
+  `DutyWiped` finalization／validation，並由 Runtime Replay 以相同 CaptureId、
+  frame／event 數直接載入；內容與 sampling diagnostics 尚待檢查。
+- 比較式 callback allocation／GC／frame-time profiling：未完成。
+
+十二、最終判定
+
+1. 正式採樣率維持 10 Hz。
+2. Party／Actor／Status 完整提取已調整為 Capture／Probe 需求驅動的 10 Hz。
+3. Condition、Pull lifecycle、Instance exit 與 Replay combat gate 保持高頻更新。
+4. Pull 開始仍立即取得第一個樣本；late callback 不補假 Frame。
+5. 已移除一個經原始碼確認的高頻浪費來源，但在完成修改前後實機 profiling
+   前，只能宣稱工作量與配置路徑已縮減，不能宣稱「零卡頓」或因果成立。
+6. 大型 Developer/Test JSON 的峰值記憶體問題仍是獨立工作，不與本次 10 Hz
+   提取混為已解決。

@@ -50,12 +50,13 @@ Required targets:
 - Boss actors
 - Position
 - Facing direction
-- HP
+- HP and barrier percentage
 - Death
 - Raise
 - Cast start/end
 - Damage/heal events when reliably obtainable
 - Status gain/loss when reliably obtainable
+- Pull-local Action names for observed casts when reliably resolvable
 - Combat start/end
 - Waymarks
 
@@ -81,10 +82,12 @@ Required:
 - 2D arena view with Player／Boss positions, facing, dead state, Waymarks, and selected-Actor focus
 - Bottom-only playback controls, speed, single Timeline, scrubbing, and player-death markers
 - Complete player-death quick-jump list with direct paused seek
-- Selected-player HP／alive snapshot and recorded active mitigation
+- Timestamp Party and selected-player HP／alive／barrier state plus recorded active mitigation and recovery support
 - Confidence-labelled immediate Death correlation built from recorded HP and Action Effects
 
 The formal Replay surface exposes only recorded player deaths for Timeline navigation. Selecting a death focuses the Actor, seeks exactly to the recorded Death timestamp, pauses playback, and opens its context. Cast and status events reconstruct the state at the selected timestamp but are not separate navigation markers. Correlated Killing Blow／HP-before-hit／Overkill values are derived interpretations, never server-authored fields: the model preserves confidence, evidence, limitations, and an algorithm version, while the UI labels estimated values and never infers responsibility, mechanic cause, or recommended action. Runtime／JSON source diagnostics remain collapsed under the advanced development section.
+
+Current Captures preserve barrier percentage and one reliable Pull-local Action-name snapshot per observed Action ID. Replay must prefer that recorded name over current-session localization and must never expose unresolved RSV placeholders as names. Status presentation is reconstructed from recorded transitions: player defensive／barrier／invulnerability effects are objective observations, healing-over-time display is optional and disabled by default, and Boss effects are limited to recorded damage-down debuffs. These rows are descriptive state, not mitigation scoring or cause attribution.
 
 ### 4.4 Death Jump
 Users can jump directly to every recorded player `Death`, including repeated deaths after a raise. The single Timeline and Quick Jump row contain player deaths only; raises, casts, status changes, Wipe, damage, and heal events are not navigation markers.
@@ -150,7 +153,7 @@ Do not implement unless the project scope is explicitly changed:
 
 ## 8. UX Constraints
 - Opening Raid Debrief must never steal focus during combat.
-- Replay windows should auto-hide or become non-intrusive when combat starts.
+- Replay windows should auto-hide on combat entry by default or remain visible but paused when the user disables auto-close. Explicit opening is always rejected during combat; changing the setting after combat begins does not create a second combat-entry action.
 - Saving or processing a pull must not create visible stutter.
 - A player should be able to reach the relevant replay moment within a few seconds after a wipe.
 - After a Wipe Pull finalizes successfully, one compact action should let the player open that same Runtime Replay; the action must disappear when combat starts.

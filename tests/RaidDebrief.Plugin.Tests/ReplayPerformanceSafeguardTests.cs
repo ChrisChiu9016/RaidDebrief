@@ -6,24 +6,21 @@ namespace RaidDebrief.Plugin.Tests;
 public sealed class ReplayPerformanceSafeguardTests
 {
     [Theory]
-    [InlineData(false, false, true, true, false, false)]
-    [InlineData(true, true, true, true, false, false)]
-    [InlineData(true, true, true, false, true, false)]
-    [InlineData(true, false, false, true, true, false)]
-    [InlineData(true, false, true, true, true, true)]
-    public void FramePolicyDrawsConfiguredCombatWindowWithoutAdvancing(
+    [InlineData(false, false, true, false, false)]
+    [InlineData(true, true, true, true, false)]
+    [InlineData(true, false, false, true, false)]
+    [InlineData(true, false, true, true, true)]
+    public void FramePolicyKeepsCombatWindowVisibleWithoutAdvancing(
         bool isOpen,
         bool inCombat,
         bool isPlaying,
-        bool closeReplayOnCombatStart,
         bool expectedDraw,
         bool expectedAdvance)
     {
         var policy = ReplayFramePolicy.Resolve(
             isOpen,
             inCombat,
-            isPlaying,
-            closeReplayOnCombatStart);
+            isPlaying);
 
         Assert.Equal(expectedDraw, policy.ShouldDraw);
         Assert.Equal(expectedAdvance, policy.ShouldAdvance);
@@ -36,8 +33,7 @@ public sealed class ReplayPerformanceSafeguardTests
         _ = ReplayFramePolicy.Resolve(
             isOpen: true,
             inCombat: false,
-            isPlaying: true,
-            closeReplayOnCombatStart: true);
+            isPlaying: true);
         var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
 
         var checksum = 0;
@@ -46,8 +42,7 @@ public sealed class ReplayPerformanceSafeguardTests
             var policy = ReplayFramePolicy.Resolve(
                 isOpen: (index & 1) == 0,
                 inCombat: (index & 2) != 0,
-                isPlaying: (index & 4) != 0,
-                closeReplayOnCombatStart: (index & 8) != 0);
+                isPlaying: (index & 4) != 0);
             checksum += policy.ShouldDraw ? 1 : 0;
             checksum += policy.ShouldAdvance ? 1 : 0;
         }

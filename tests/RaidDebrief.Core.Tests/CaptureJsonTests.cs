@@ -23,6 +23,102 @@ public sealed class CaptureJsonTests
         Assert.Equal(source.Frames[2].Actors[0], loaded.Frames[2].Actors[0]);
         Assert.True(loaded.Frames[2].Actors[0].IsOmnidirectional);
     }
+    [Fact]
+    public void RoundTripPreservesRecordedActionNames()
+    {
+        var source = CreateRecord([0]) with
+        {
+            Features = CaptureFeatures.Current | CaptureFeatures.ActionNameSnapshot,
+            ActionNames =
+            [
+                new RecordedActionName
+                {
+                    ActionId = 49_890,
+                    Name = "Recorded Boss Cast",
+                    Language = "English",
+                    Source = ActionNameSource.RuntimeRsv,
+                },
+            ],
+        };
+
+        var loaded = CaptureJson.Deserialize(CaptureJson.Serialize(source));
+
+        var actionName = Assert.Single(loaded.ActionNames);
+        Assert.Equal(49_890u, actionName.ActionId);
+        Assert.Equal("Recorded Boss Cast", actionName.Name);
+        Assert.Equal("English", actionName.Language);
+        Assert.Equal(ActionNameSource.RuntimeRsv, actionName.Source);
+    }
+
+    [Fact]
+    public void RoundTripPreservesBarrierPercentageAndLegacyJsonRemainsUnknown()
+    {
+        var source = CreateRecord([0]) with
+        {
+            Features = CaptureFeatures.Current | CaptureFeatures.BarrierState,
+            Frames =
+            [
+                CreateRecord([0]).Frames[0] with
+                {
+                    Actors =
+                    [
+                        CreateRecord([0]).Frames[0].Actors[0] with
+                        {
+                            BarrierPercentage = 17,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        var loaded = CaptureJson.Deserialize(CaptureJson.Serialize(source));
+        Assert.True((loaded.Features & CaptureFeatures.BarrierState) != 0);
+        Assert.Equal((byte)17, loaded.Frames[0].Actors[0].BarrierPercentage);
+
+        var legacy = CaptureJson.Deserialize(CaptureJson.Serialize(CreateRecord([0])));
+        Assert.True((legacy.Features & CaptureFeatures.BarrierState) == 0);
+        Assert.Equal((byte)0, legacy.Frames[0].Actors[0].BarrierPercentage);
+    }
+
+    [Fact]
+    public void LegacyJsonWithoutActionNamesLoadsAsEmpty()
+    {
+        var json = CaptureJson.Serialize(CreateRecord([0]));
+        json = json.Replace(
+            "  \"actionNames\": [],\n",
+            string.Empty,
+            StringComparison.Ordinal);
+
+        var loaded = CaptureJson.Deserialize(json);
+
+        Assert.Empty(loaded.ActionNames);
+        Assert.Equal(CaptureFeatures.Current, loaded.Features);
+    }
+
+    [Fact]
+    public void RejectsUnresolvedRecordedActionName()
+    {
+        var record = CreateRecord([0]) with
+        {
+            Features = CaptureFeatures.Current | CaptureFeatures.ActionNameSnapshot,
+            ActionNames =
+            [
+                new RecordedActionName
+                {
+                    ActionId = 49_890,
+                    Name = "_rsv_49890_-1_1_0_0",
+                    Language = "English",
+                    Source = ActionNameSource.RuntimeRsv,
+                },
+            ],
+        };
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => PullRecordValidator.Validate(record));
+
+        Assert.Contains("unresolved", exception.Message, StringComparison.Ordinal);
+    }
+
 
     [Fact]
     public void LegacyAllWithoutMarkerFramesDoesNotClaimTargetMarkerCapture()
@@ -84,6 +180,22 @@ public sealed class CaptureJsonTests
         var exception = Assert.Throws<InvalidDataException>(() => PullRecordValidator.Validate(record));
 
         Assert.Contains("finite", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AcceptsBarrierPercentageAboveOneHundred()
+    {
+        // Stacked shields routinely exceed maximum health. Rejecting them dropped the whole
+        // actor sample, which left holes in the replay for the shielded party member.
+        var record = CreateRecord([0]);
+        record.Frames[0].Actors[0] = record.Frames[0].Actors[0] with
+        {
+            BarrierPercentage = 180,
+        };
+
+        PullRecordValidator.Validate(record);
+
+        Assert.Equal(180, record.Frames[0].Actors[0].BarrierPercentage);
     }
 
     [Fact]

@@ -8,6 +8,8 @@ namespace RaidDebrief.Plugin;
 
 internal static class JobIconResources
 {
+    public const int UnknownRoleOrder = 11;
+
     private static readonly uint[] SupportedIds =
     [
         19, // PLD
@@ -104,5 +106,28 @@ internal static class JobIconResources
         41 => "VPR",
         42 => "PCT",
         _ => null,
+    };
+
+    /// <summary>
+    /// Sort key ordering jobs as tanks, healers, melee, physical ranged, then casters.
+    /// Tanks and healers are additionally split by sustain style: self-sustain tanks
+    /// (WAR, DRK) precede mitigation tanks (PLD, GNB), and pure healers (AST, WHM)
+    /// precede barrier healers (SCH, SGE).
+    /// Unrecognised jobs sort last so that a future job never displaces a known role.
+    /// </summary>
+    public static int GetRoleOrder(uint classJobId) => classJobId switch
+    {
+        21 => 0,                                // WAR
+        32 => 1,                                // DRK
+        19 => 2,                                // PLD
+        37 => 3,                                // GNB
+        33 => 4,                                // AST
+        24 => 5,                                // WHM
+        28 => 6,                                // SCH
+        40 => 7,                                // SGE
+        20 or 22 or 30 or 34 or 39 or 41 => 8,  // MNK DRG NIN SAM RPR VPR
+        23 or 31 or 38 => 9,                    // BRD MCH DNC
+        25 or 27 or 35 or 42 => 10,             // BLM SMN RDM PCT
+        _ => UnknownRoleOrder,
     };
 }

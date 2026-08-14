@@ -19,7 +19,10 @@ public readonly record struct ArenaActorMarker(
     uint MaxHp,
     bool IsDead,
     bool IsTargetable,
-    bool IsOmnidirectional);
+    bool IsOmnidirectional)
+{
+    public byte? BarrierPercentage { get; init; }
+}
 
 public readonly record struct ArenaWaymarkMarker(
     WaymarkId Id,
@@ -120,6 +123,7 @@ public sealed class ArenaSceneBuilder
     private readonly ArenaProjection projection;
     private readonly IReadOnlySet<int> renderableActorIds;
     private readonly ResolvedActorState[] actorStateBuffer;
+    private readonly bool barrierStateAvailable;
 
     public ArenaSceneBuilder(PullRecord record, ArenaProjection projection)
     {
@@ -133,6 +137,8 @@ public sealed class ArenaSceneBuilder
         this.actorStateBuffer = new ResolvedActorState[this.actorStates.ActorCount];
         this.renderableActorIds = projection.RenderableActorIds
             ?? ArenaActorVisibility.BuildRenderableActorIds(record);
+        this.barrierStateAvailable =
+            (record.Features & CaptureFeatures.BarrierState) != 0;
     }
 
     public ArenaProjection Projection => this.projection;
@@ -175,7 +181,12 @@ public sealed class ArenaSceneBuilder
                 state.MaxHp,
                 state.IsDead,
                 state.IsTargetable,
-                state.IsOmnidirectional));
+                state.IsOmnidirectional)
+            {
+                BarrierPercentage = this.barrierStateAvailable
+                    ? state.BarrierPercentage
+                    : null,
+            });
         }
 
         var waymarks = this.waymarkStates.Resolve(timestampMilliseconds);

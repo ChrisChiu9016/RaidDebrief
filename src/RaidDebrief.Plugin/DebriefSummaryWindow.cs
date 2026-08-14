@@ -22,8 +22,8 @@ internal readonly record struct PendingDebrief(
 internal sealed class DebriefSummaryController
 {
     private long observedCompletedGeneration;
+    private long? presentedSourceGeneration;
     private PendingDebrief? queuedDebrief;
-
     public PendingDebrief? Pending { get; private set; }
 
     public void Observe(ReplaySourceSnapshot snapshot, bool inCombat, bool enabled)
@@ -58,6 +58,18 @@ internal sealed class DebriefSummaryController
             this.Pending = queuedDebrief;
             this.queuedDebrief = null;
         }
+    }
+
+    public bool TryBeginPresentation()
+    {
+        if (this.Pending is not { } pending
+            || this.presentedSourceGeneration == pending.SourceGeneration)
+        {
+            return false;
+        }
+
+        this.presentedSourceGeneration = pending.SourceGeneration;
+        return true;
     }
 
     public bool TryTake(out DebriefReplayRequest request)
@@ -116,7 +128,14 @@ internal sealed class DebriefSummaryWindow : Window
     public void Update(ReplaySourceSnapshot snapshot, bool inCombat, bool enabled)
     {
         this.controller.Observe(snapshot, inCombat, enabled);
-        this.IsOpen = this.controller.Pending is not null;
+        if (this.controller.Pending is null)
+        {
+            this.IsOpen = false;
+        }
+        else if (this.controller.TryBeginPresentation())
+        {
+            this.IsOpen = true;
+        }
     }
 
     public override void Draw()

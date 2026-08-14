@@ -20,13 +20,17 @@ public enum CaptureFeatures
     CastTiming = 1 << 6,
     StatusTiming = 1 << 7,
     ActionEffectCapture = 1 << 8,
+    ActionNameSnapshot = 1 << 9,
+    BarrierState = 1 << 10,
     // Preserve the legacy named value because existing JSON serializes this exact flag name.
     Current = All | TargetMarkerCanonicalOrder | OmnidirectionalState,
     ReplayPresentation = Current
         | PartyMembership
         | CastTiming
         | StatusTiming
-        | ActionEffectCapture,
+        | ActionEffectCapture
+        | ActionNameSnapshot
+        | BarrierState,
 }
 
 public sealed record PullRecord
@@ -56,9 +60,28 @@ public sealed record PullRecord
     public WaymarkFrame[] WaymarkFrames { get; init; } = [];
 
     public ActionEffectRecord[] ActionEffects { get; init; } = [];
+    public RecordedActionName[] ActionNames { get; init; } = [];
 
     public TargetMarkerFrame[] TargetMarkerFrames { get; init; } = [];
 }
+public enum ActionNameSource
+{
+    StaticExcel,
+    RuntimeRsv,
+    UiObserved,
+}
+
+public sealed record RecordedActionName
+{
+    public required uint ActionId { get; init; }
+
+    public required string Name { get; init; }
+
+    public required string Language { get; init; }
+
+    public required ActionNameSource Source { get; init; }
+}
+
 
 public sealed record ActorRecord
 {
@@ -110,6 +133,12 @@ public sealed record ActorStateSample
     public required uint CurrentHp { get; init; }
 
     public required uint MaxHp { get; init; }
+
+    /// <summary>
+    /// Recorded barrier strength as a percentage of maximum HP.
+    /// Meaningful only when the Pull has the BarrierState capture feature.
+    /// </summary>
+    public byte BarrierPercentage { get; init; }
 
     public required bool IsDead { get; init; }
 

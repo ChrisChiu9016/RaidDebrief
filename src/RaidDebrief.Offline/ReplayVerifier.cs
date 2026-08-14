@@ -248,6 +248,7 @@ internal static class ReplayVerifier
             hash = Add(hash, BitConverter.SingleToInt32Bits(actor.Facing.Y));
             hash = Add(hash, actor.CurrentHp);
             hash = Add(hash, actor.MaxHp);
+            hash = Add(hash, actor.BarrierPercentage is { } barrierPercentage ? barrierPercentage + 1 : 0);
             hash = Add(hash, actor.IsDead ? 1 : 0);
             hash = Add(hash, actor.IsTargetable ? 1 : 0);
         }

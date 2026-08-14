@@ -24,10 +24,14 @@ internal sealed class LiveDataProbe : IDisposable
     private readonly BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog;
     private readonly ActorProbeSnapshot[] actors;
     private readonly PolledStatusObservation[]?[] actorStatuses;
+    private readonly ActorNameCache actorNameCache;
     private readonly PartyMemberProbeSnapshot[] partyMembers = new PartyMemberProbeSnapshot[24];
+    private readonly FrameworkScanCoordinator scanCoordinator = new(100);
+    private readonly long frameworkStartedTimestamp = Stopwatch.GetTimestamp();
 
     private int actorCount;
     private int partyMemberCount;
+    private bool probeRefreshEnabled;
     private bool disposed;
 
     public LiveDataProbe(
@@ -51,7 +55,7 @@ internal sealed class LiveDataProbe : IDisposable
             ?? throw new ArgumentNullException(nameof(omnidirectionalityCatalog));
         this.actors = new ActorProbeSnapshot[objectTable.Length];
         this.actorStatuses = new PolledStatusObservation[objectTable.Length][];
-
+        this.actorNameCache = new ActorNameCache(objectTable.Length);
         this.framework.Update += this.OnFrameworkUpdate;
     }
 
@@ -77,10 +81,11 @@ internal sealed class LiveDataProbe : IDisposable
 
     public double MaximumCallbackMilliseconds { get; private set; }
 
-    public long UpdateCount { get; private set; }
+    public long FrameworkCallbackCount { get; private set; }
 
     public long ErrorCount { get; private set; }
     public long RejectedVolatileActorReadCount { get; private set; }
+    public long FullScanCount { get; private set; }
 
 
     public string? LastError { get; private set; }
@@ -89,12 +94,16 @@ internal sealed class LiveDataProbe : IDisposable
 
     public ReadOnlySpan<PartyMemberProbeSnapshot> PartyMembers => this.partyMembers.AsSpan(0, this.partyMemberCount);
 
+    public void SetProbeRefreshEnabled(bool enabled) =>
+        this.probeRefreshEnabled = enabled;
+
     public void Dispose()
     {
         if (this.disposed)
         {
             return;
         }
+        this.probeRefreshEnabled = false;
 
         this.disposed = true;
         this.framework.Update -= this.OnFrameworkUpdate;
@@ -103,26 +112,60 @@ internal sealed class LiveDataProbe : IDisposable
     private void OnFrameworkUpdate(IFramework _)
     {
         var startedAt = Stopwatch.GetTimestamp();
+        FrameworkCaptureDecision captureDecision = default;
+        FrameworkScanDecision scanDecision = default;
+        var captureSampleSubmitted = false;
+        var probeScanCompleted = false;
 
         try
         {
             this.IsOnFrameworkThread = this.framework.IsInFrameworkUpdateThread;
             this.CaptureClientState();
-            this.CaptureParty();
-            this.CaptureActors();
-            this.captureService.RecordFrameworkSnapshot(
-                this.Actors,
-                this.PartyMembers,
+            captureDecision = this.captureService.BeginFrameworkUpdate(
                 this.InCombat,
                 this.TerritoryType,
                 this.MapId,
                 this.Instance,
                 isInDutyInstance: this.IsInDutyInstance);
-            this.UpdateCount++;
+            scanDecision = this.scanCoordinator.Decide(
+                captureDecision.SampleRequested,
+                this.captureService.IsRecording,
+                ShouldRefreshProbe(this.probeRefreshEnabled, this.IsInDutyInstance),
+                (long)Stopwatch.GetElapsedTime(this.frameworkStartedTimestamp).TotalMilliseconds);
+            if (scanDecision.ShouldScan)
+            {
+                this.CaptureParty();
+                this.CaptureActors();
+                this.FullScanCount++;
+
+                if (captureDecision.SampleRequested)
+                {
+                    this.captureService.SubmitFrameworkSample(
+                        captureDecision.Sample,
+                        this.Actors,
+                        this.PartyMembers);
+                    captureSampleSubmitted = true;
+                }
+
+                this.scanCoordinator.CompleteProbeScan(scanDecision);
+                probeScanCompleted = true;
+            }
+
+            this.FrameworkCallbackCount++;
             this.LastError = null;
         }
         catch (Exception exception)
         {
+            if (captureDecision.SampleRequested && !captureSampleSubmitted)
+            {
+                this.TryCancelCaptureSample(captureDecision.Sample);
+            }
+
+            if (!probeScanCompleted)
+            {
+                this.scanCoordinator.CancelProbeScan(scanDecision);
+            }
+
             this.ErrorCount++;
             this.LastError = exception.Message;
             if (this.ErrorCount == 1 || this.ErrorCount % 300 == 0)
@@ -133,7 +176,9 @@ internal sealed class LiveDataProbe : IDisposable
         finally
         {
             this.LastCallbackMilliseconds = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-            this.MaximumCallbackMilliseconds = Math.Max(this.MaximumCallbackMilliseconds, this.LastCallbackMilliseconds);
+            this.MaximumCallbackMilliseconds = Math.Max(
+                this.MaximumCallbackMilliseconds,
+                this.LastCallbackMilliseconds);
         }
     }
 
@@ -191,9 +236,17 @@ internal sealed class LiveDataProbe : IDisposable
         bool boundByDuty95) =>
         boundByDuty || boundByDuty56 || boundByDuty95;
 
+    internal static bool ShouldRefreshProbe(
+        bool probeRefreshRequested,
+        bool isInDutyInstance) =>
+        probeRefreshRequested && isInDutyInstance;
+
 
     internal static bool IsRecordablePlayerEntity(uint entityId) =>
         entityId != 0 && entityId != NonNetworkedEntityId;
+
+    internal static bool IsRecordableActorName(string? name) =>
+        !string.IsNullOrWhiteSpace(name);
 
     private void CaptureActors()
     {
@@ -258,15 +311,22 @@ internal sealed class LiveDataProbe : IDisposable
             return false;
         }
 
-        var previous = this.actors[destinationIndex];
-        var name = previous.GameObjectId == gameObject.GameObjectId
-            ? previous.Name
-            : gameObject.Name.TextValue;
+        if (!this.actorNameCache.TryGet(objectIndex, gameObject.GameObjectId, out var name))
+        {
+            name = gameObject.Name.TextValue;
+            if (!IsRecordableActorName(name))
+            {
+                return false;
+            }
+
+            this.actorNameCache.Store(objectIndex, gameObject.GameObjectId, name);
+        }
 
         uint currentHp = 0;
         uint maxHp = 0;
         uint currentMp = 0;
         uint maxMp = 0;
+        byte barrierPercentage = 0;
         uint classJobId = 0;
         byte level = 0;
 
@@ -276,6 +336,7 @@ internal sealed class LiveDataProbe : IDisposable
             maxHp = character.MaxHp;
             currentMp = character.CurrentMp;
             maxMp = character.MaxMp;
+            barrierPercentage = character.ShieldPercentage;
             classJobId = character.ClassJob.RowId;
             level = character.Level;
         }
@@ -286,7 +347,7 @@ internal sealed class LiveDataProbe : IDisposable
         ulong castTargetObjectId = 0;
         float currentCastTime = 0;
         float totalCastTime = 0;
-        var statuses = this.actorStatuses[destinationIndex];
+        var statuses = this.actorStatuses[objectIndex];
         var statusCount = 0;
         var hasDirectionalDisregard = false;
 
@@ -298,15 +359,17 @@ internal sealed class LiveDataProbe : IDisposable
             castTargetObjectId = battleChara.CastTargetObjectId;
             currentCastTime = battleChara.CurrentCastTime;
             totalCastTime = battleChara.TotalCastTime;
-            if (statuses is null || statuses.Length < battleChara.StatusList.Length)
+            var statusList = battleChara.StatusList;
+            var statusListLength = statusList.Length;
+            if (statuses is null || statuses.Length < statusListLength)
             {
-                statuses = new PolledStatusObservation[battleChara.StatusList.Length];
-                this.actorStatuses[destinationIndex] = statuses;
+                statuses = new PolledStatusObservation[statusListLength];
+                this.actorStatuses[objectIndex] = statuses;
             }
 
-            for (var statusIndex = 0; statusIndex < battleChara.StatusList.Length; statusIndex++)
+            for (var statusIndex = 0; statusIndex < statusListLength; statusIndex++)
             {
-                var status = battleChara.StatusList[statusIndex];
+                var status = statusList[statusIndex];
                 if (status is not null && status.StatusId != 0)
                 {
                     var remainingTime = float.IsFinite(status.RemainingTime)
@@ -364,8 +427,21 @@ internal sealed class LiveDataProbe : IDisposable
             isOmnidirectional,
             isOmnidirectionalityKnown,
             statuses,
-            statusCount);
+            statusCount,
+            barrierPercentage);
         return true;
+    }
+
+    private void TryCancelCaptureSample(in FrameworkCaptureSample sample)
+    {
+        try
+        {
+            this.captureService.CancelFrameworkSample(sample);
+        }
+        catch (InvalidOperationException)
+        {
+            // Submission may have consumed the sample before failing downstream.
+        }
     }
 
     private void RecordVolatileActorReadFailure(int objectIndex, Exception exception)
@@ -382,6 +458,52 @@ internal sealed class LiveDataProbe : IDisposable
         }
     }
 }
+internal sealed class ActorNameCache
+{
+    private readonly ulong[] gameObjectIds;
+    private readonly string?[] names;
+
+    public ActorNameCache(int capacity)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(capacity);
+        this.gameObjectIds = new ulong[capacity];
+        this.names = new string[capacity];
+    }
+
+    public int Capacity => this.gameObjectIds.Length;
+
+    public bool TryGet(int objectIndex, ulong gameObjectId, out string name)
+    {
+        if ((uint)objectIndex >= (uint)this.gameObjectIds.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(objectIndex));
+        }
+
+        if (gameObjectId != 0
+            && this.gameObjectIds[objectIndex] == gameObjectId
+            && this.names[objectIndex] is { } cachedName)
+        {
+            name = cachedName;
+            return true;
+        }
+
+        name = string.Empty;
+        return false;
+    }
+
+    public void Store(int objectIndex, ulong gameObjectId, string name)
+    {
+        if ((uint)objectIndex >= (uint)this.gameObjectIds.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(objectIndex));
+        }
+
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        this.gameObjectIds[objectIndex] = gameObjectId;
+        this.names[objectIndex] = name;
+    }
+}
+
 
 internal readonly record struct PartyMemberProbeSnapshot(
     int Index,
@@ -427,4 +549,5 @@ internal readonly record struct ActorProbeSnapshot(
     bool IsOmnidirectional,
     bool IsOmnidirectionalityKnown,
     PolledStatusObservation[] Statuses,
-    int StatusCount);
+    int StatusCount,
+    byte BarrierPercentage = 0);

@@ -6,10 +6,14 @@ namespace RaidDebrief.Plugin.Tests;
 public sealed class ReplayPresentationModelTests
 {
     [Fact]
-    public void UsesRecordedPartyOrderAndLargestUnownedBattleNpc()
+    public void OrdersPartyByRoleThenPartyIndexAndPicksLargestUnownedBattleNpc()
     {
+        // PartyIndex order would be second(0), first(1), tank(2), melee(3).
+        // Role order must hoist the tank and healer above both melee jobs.
         var first = CreateActor(1, "Player 1", "Pc", 100, 39, partyIndex: 1);
         var second = CreateActor(2, "Player 2", "Pc", 200, 24, partyIndex: 0);
+        var tank = CreateActor(6, "Player 3", "Pc", 600, 21, partyIndex: 2);
+        var melee = CreateActor(7, "Player 4", "Pc", 700, 20, partyIndex: 3);
         var add = CreateActor(3, "Add", "BattleNpc", 300, 0);
         var boss = CreateActor(
             4,
@@ -34,7 +38,7 @@ public sealed class ReplayPresentationModelTests
             TerritoryType = 1,
             MapId = 1,
             Instance = 0,
-            Actors = [first, second, add, boss, pet],
+            Actors = [first, second, add, boss, pet, tank, melee],
             Frames =
             [
                 new PositionFrame
@@ -47,6 +51,8 @@ public sealed class ReplayPresentationModelTests
                         CreateSample(3, 1_000),
                         CreateSample(4, 10_000),
                         CreateSample(5, 100_000),
+                        CreateSample(6, 100),
+                        CreateSample(7, 100),
                     ],
                 },
             ],
@@ -54,7 +60,8 @@ public sealed class ReplayPresentationModelTests
 
         var presentation = ReplayPresentationModel.Create(record);
 
-        Assert.Equal([2, 1], presentation.PartyActors.Select(actor => actor.StableActorId));
+        // WAR tank, WHM healer, then the two melee ordered by PartyIndex.
+        Assert.Equal([6, 2, 1, 7], presentation.PartyActors.Select(actor => actor.StableActorId));
         Assert.Equal(4, presentation.BossActor?.StableActorId);
         Assert.Empty(presentation.Deaths);
     }

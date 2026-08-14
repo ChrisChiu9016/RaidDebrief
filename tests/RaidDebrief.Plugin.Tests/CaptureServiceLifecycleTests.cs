@@ -418,7 +418,9 @@ public sealed class CaptureServiceLifecycleTests
                     | CaptureFeatures.HitboxRadius
                     | CaptureFeatures.OmnidirectionalState
                     | CaptureFeatures.CastTiming
-                    | CaptureFeatures.StatusTiming,
+                    | CaptureFeatures.StatusTiming
+                    | CaptureFeatures.ActionNameSnapshot
+                    | CaptureFeatures.BarrierState,
                 record.Features);
             Assert.Contains(record.Actors, actor => actor.GameObjectId == 803 && actor.OwnerId == 801);
             Assert.All(
@@ -595,7 +597,17 @@ public sealed class CaptureServiceLifecycleTests
     {
         var exportDirectory = CreateExportDirectory();
         var dutyState = new FakeDutyState();
-        var service = CreateService(exportDirectory, dutyState, automaticCaptureEnabled: false);
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            automaticCaptureEnabled: false,
+            resolveActionName: static (actionId, _) => new RecordedActionName
+            {
+                ActionId = actionId,
+                Name = "Recorded Cast",
+                Language = "English",
+                Source = ActionNameSource.RuntimeRsv,
+            });
         try
         {
             service.SetActionEffectCaptureAvailability(true);
@@ -634,6 +646,11 @@ public sealed class CaptureServiceLifecycleTests
             Assert.True((record.Features & CaptureFeatures.CastTiming) != 0);
             Assert.True((record.Features & CaptureFeatures.StatusTiming) != 0);
             Assert.True((record.Features & CaptureFeatures.ActionEffectCapture) != 0);
+            Assert.True((record.Features & CaptureFeatures.ActionNameSnapshot) != 0);
+            var actionName = Assert.Single(record.ActionNames);
+            Assert.Equal(1_234u, actionName.ActionId);
+            Assert.Equal("Recorded Cast", actionName.Name);
+            Assert.Equal(ActionNameSource.RuntimeRsv, actionName.Source);
             Assert.Equal(0, Assert.Single(record.Actors).PartyIndex);
             var cast = Assert.Single(
                 record.Events,
@@ -811,6 +828,106 @@ public sealed class CaptureServiceLifecycleTests
         }
     }
 
+    [Fact]
+    public void DiagnosticsFormattingIsLazyAndCached()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            automaticCaptureEnabled: false);
+        try
+        {
+            Assert.True(service.Start(10, 20, 0));
+            dutyState.Raise(ObservedEventType.DutyStarted);
+            service.RecordActionEffect(
+                globalSequence: 1,
+                actionId: 42,
+                actionType: 1,
+                sourceObjectId: 100,
+                animationTargetObjectId: null,
+                []);
+
+            Assert.Equal(0, service.DiagnosticsFormatCount);
+
+            var firstStatus = service.Status;
+            Assert.NotNull(firstStatus.LastEvent);
+            Assert.NotNull(firstStatus.LastActionEffect);
+            Assert.Equal(2, service.DiagnosticsFormatCount);
+
+            _ = service.Status;
+            Assert.Equal(2, service.DiagnosticsFormatCount);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
+    public void IdleFrameworkLifecyclePathAllocatesNothingAfterWarmup()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            automaticCaptureEnabled: false);
+        try
+        {
+            for (var iteration = 0; iteration < 1_000; iteration++)
+            {
+                _ = service.BeginFrameworkUpdate(false, 10, 20, 0);
+            }
+
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var iteration = 0; iteration < 10_000; iteration++)
+            {
+                _ = service.BeginFrameworkUpdate(false, 10, 20, 0);
+            }
+
+            Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
+    public void AutomaticCombatStartRequestsAndRecordsImmediateFirstSample()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var service = CreateService(exportDirectory, dutyState);
+        try
+        {
+            Assert.False(service.BeginFrameworkUpdate(false, 10, 20, 0).SampleRequested);
+
+            var decision = service.BeginFrameworkUpdate(true, 10, 20, 0);
+            Assert.True(decision.SampleRequested);
+            Assert.True(service.IsRecording);
+            service.SubmitFrameworkSample(
+                decision.Sample,
+                [CreateActor("Immediate", 101)],
+                []);
+
+            dutyState.Raise(ObservedEventType.DutyWiped);
+            var record = WaitForCompleted(service, expectedCompletedPullCount: 1);
+            var frame = Assert.Single(record.Frames);
+            Assert.Contains(frame.Actors, actor => actor.StableActorId == 1);
+            Assert.InRange(frame.TimestampMilliseconds, 0, 100);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
     private static CaptureService CreateService(
         string developerExportDirectory,
         FakeDutyState dutyState,
@@ -820,7 +937,8 @@ public sealed class CaptureServiceLifecycleTests
         FakePluginLog? pluginLog = null,
         Action<string, PullRecord>? exportCapture = null,
         Action<PullRecord>? validateCapture = null,
-        Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null)
+        Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null,
+        Func<uint, uint, RecordedActionName?>? resolveActionName = null)
     {
         var log = pluginLog ?? new FakePluginLog();
         return new CaptureService(
@@ -834,7 +952,8 @@ public sealed class CaptureServiceLifecycleTests
             automaticLifecycle,
             exportCapture,
             validateCapture,
-            analyzeDebrief);
+            analyzeDebrief,
+            resolveActionName);
     }
 
     private static void WaitForBackgroundWork(CaptureService service)

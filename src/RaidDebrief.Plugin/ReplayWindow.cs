@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using System.Globalization;
@@ -22,6 +23,17 @@ internal enum TargetCircleVariant
     Directional,
     Omnidirectional,
 }
+internal enum MitigationTargetKind
+{
+    Player,
+    Boss,
+}
+
+internal readonly record struct ActiveMitigationStatus(
+    uint StatusId,
+    int ActiveEventIndex,
+    MitigationTargetKind TargetKind);
+
 
 internal enum RuntimeReplaySourceDecisionKind
 {
@@ -209,6 +221,40 @@ internal sealed class ReplayWindow : Window, IDisposable
     internal const float EnemyHudHorizontalInset = 12;
     internal const float EnemyHudTopInset = 28;
     private const long CastCompletionToleranceMilliseconds = 150;
+    private const long DeathContextWindowMilliseconds = 8_000;
+    internal const float ReplayWindowBackgroundAlpha = 0.96f;
+    private const float PanelRounding = 6;
+    private static readonly Vector4 PanelBackgroundColor = new(0.09f, 0.09f, 0.11f, 0.55f);
+    private static readonly Vector4 SectionHeaderColor = new(0.74f, 0.78f, 0.88f, 1f);
+    private const float PartyJobTextScale = 1.2f;
+    private const float PartyValueTextScale = 0.95f;
+    private const float KillingBlowActionTextScale = 1.15f;
+    private const float KillingBlowAmountTextScale = 1.6f;
+    private const float KillingBlowSourceTextScale = 0.95f;
+    private const float KillingBlowCardPadding = 8;
+    private const float KillingBlowCardRounding = 4;
+    private static readonly Vector4 KillingBlowCardColor = new(0.22f, 0.09f, 0.10f, 0.75f);
+    private static readonly Vector4 KillingBlowCardBorderColor = new(0.62f, 0.24f, 0.24f, 0.85f);
+    private static readonly Vector4 KillingBlowAmountColor = new(1f, 0.52f, 0.46f, 1f);
+    private const float PartyIconSize = 22;
+    private const float PartyJobTextOffset = 27;
+    private const float PartyHpTextOffset = 78;
+    private const float PartyRowBarHeight = 8;
+    private const float PartyBarrierBarHeight = 6;
+    private const float PartyBarrierOverhang = 3;
+    private const float PartyRowBarGap = 5;
+    private const float PartyRowBottomPadding = 5;
+    private const float PartyBarRounding = 1.5f;
+    private const float PartyDeadRowAlpha = 0.45f;
+    private static readonly Vector4 PartyBarTrackColor = new(0.08f, 0.10f, 0.14f, 0.95f);
+    private static readonly Vector4 PartyBarrierColor = new(0.96f, 0.86f, 0.24f, 1f);
+    private static readonly Vector4 PartyHpColor = new(0.30f, 0.72f, 0.38f, 1f);
+    private static readonly Vector4 PartyDeadTextColor = new(0.86f, 0.30f, 0.28f, 1f);
+    private static readonly Vector4 PartyDeadBarColor = new(0.42f, 0.16f, 0.16f, 1f);
+    private const float MitigationIconSize = 30;
+    private const float MitigationTileWidth = 38;
+    private const float MitigationTileGap = 6;
+    private const int MaximumDisplayedMitigations = 64;
     private readonly CaptureService captureService;
     private readonly ISharedImmediateTexture targetCircleTexture;
     private readonly ISharedImmediateTexture omnidirectionalTargetRingTexture;
@@ -216,8 +262,10 @@ internal sealed class ReplayWindow : Window, IDisposable
     private readonly ISharedImmediateTexture?[] jobIcons;
     private readonly ISharedImmediateTexture[] targetMarkerTextures;
     private readonly ISharedImmediateTexture?[] waymarkTextures;
+    private readonly Dictionary<uint, ISharedImmediateTexture> statusEffectIcons;
     private readonly ReplayMapBackgroundResolver mapBackgroundResolver;
     private readonly ReplayGameDataCatalog gameDataCatalog;
+    private readonly Action<bool> saveShowHotEffectsSetting;
     private ReplayMapBackground? mapBackground;
     private string fixturePath;
     private ReplaySession? session;
@@ -244,14 +292,16 @@ internal sealed class ReplayWindow : Window, IDisposable
     private ArenaViewport minimumArenaViewport = ArenaViewport.Fit;
     private bool disposed;
     private bool closeReplayOnCombatStart = true;
+    private bool showHotEffects;
     private int? selectedPlayerStableActorId;
-    private int? selectedDeathOriginalRecordedIndex;
 
     public ReplayWindow(
         CaptureService captureService,
         ITextureProvider textureProvider,
         IDataManager dataManager,
         BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog,
+        bool showHotEffects,
+        Action<bool> saveShowHotEffectsSetting,
         string pluginConfigDirectory,
         string pluginAssemblyPath)
         : base("Raid Debrief — Replay##RaidDebriefReplay")
@@ -259,6 +309,9 @@ internal sealed class ReplayWindow : Window, IDisposable
         this.captureService = captureService;
         this.omnidirectionalityCatalog = omnidirectionalityCatalog
             ?? throw new ArgumentNullException(nameof(omnidirectionalityCatalog));
+        this.showHotEffects = showHotEffects;
+        this.saveShowHotEffectsSetting = saveShowHotEffectsSetting
+            ?? throw new ArgumentNullException(nameof(saveShowHotEffectsSetting));
         this.jobIcons = JobIconResources.LoadTextures(textureProvider, typeof(ReplayWindow).Assembly);
         this.targetCircleTexture = LoadTargetCircle(textureProvider);
         this.omnidirectionalTargetRingTexture = LoadTargetCircle(
@@ -267,6 +320,9 @@ internal sealed class ReplayWindow : Window, IDisposable
         this.targetMarkerTextures = LoadTargetMarkers(textureProvider);
         this.waymarkTextures = LoadWaymarkTextures(textureProvider);
         this.gameDataCatalog = new ReplayGameDataCatalog(dataManager);
+        this.statusEffectIcons = LoadStatusEffectIcons(
+            textureProvider,
+            this.gameDataCatalog);
         var mapCanvasCatalog = new ReplayMapCanvasCatalog(dataManager, Plugin.Log);
         this.mapBackgroundResolver = new ReplayMapBackgroundResolver(
             mapCanvasCatalog,
@@ -277,8 +333,10 @@ internal sealed class ReplayWindow : Window, IDisposable
                 record,
                 mapCanvasCatalog.CreateProjection(record)));
         Plugin.Log.Information(
-            "Replay uses directional and omnidirectional embedded Target Ring textures, 8 native Waymark icons, and {TargetMarkerCount} Target Marker textures; Waymark A-D use a {LetterWaymarkRadius:F2}-unit world radius, Waymark 1-4 use a {NumberWaymarkEdge:F2}-unit world edge, Player Target Circle is fixed at {PlayerCircleWidth}px, and Boss/Add rings use recorded world-space HitboxRadius.",
+            "Replay uses directional and omnidirectional embedded Target Ring textures, 8 native Waymark icons, {TargetMarkerCount} Target Marker textures, and {StatusEffectIconCount}/{StatusEffectCount} native defensive/HoT Status icons classified once from English Lumina descriptions; Waymark A-D use a {LetterWaymarkRadius:F2}-unit world radius, Waymark 1-4 use a {NumberWaymarkEdge:F2}-unit world edge, Player Target Circle is fixed at {PlayerCircleWidth}px, and Boss/Add rings use recorded world-space HitboxRadius.",
             this.targetMarkerTextures.Length,
+            this.statusEffectIcons.Count,
+            this.gameDataCatalog.StatusEffects.Count,
             LetterWaymarkWorldRadius,
             NumberWaymarkWorldHalfSize * 2,
             PlayerTargetCircleHalfWidth * 2);
@@ -288,6 +346,7 @@ internal sealed class ReplayWindow : Window, IDisposable
             MinimumSize = new Vector2(1_040, 680),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
+        this.BgAlpha = ReplayWindowBackgroundAlpha;
     }
 
     public void OpenRuntime(bool inCombat)
@@ -298,13 +357,6 @@ internal sealed class ReplayWindow : Window, IDisposable
         }
 
         this.UpdateUiState(inCombat, this.closeReplayOnCombatStart);
-        if (!this.combatGate.CanOpen)
-        {
-            this.statusMessage =
-                "目前正在戰鬥；Replay 不會開啟。脫離戰鬥後請再次明確開啟。";
-            Plugin.Log.Information("Replay open request rejected while InCombat=true.");
-            return;
-        }
 
         this.IsOpen = true;
         this.RequestRuntimeSource();
@@ -318,13 +370,6 @@ internal sealed class ReplayWindow : Window, IDisposable
         }
 
         this.UpdateUiState(inCombat, this.closeReplayOnCombatStart);
-        if (!this.combatGate.CanOpen)
-        {
-            this.statusMessage =
-                "目前正在戰鬥；Debrief Replay 不會開啟。脫離戰鬥後請再次明確開啟。";
-            Plugin.Log.Information("Debrief Replay open request rejected while InCombat=true.");
-            return;
-        }
 
         var snapshot = this.captureService.GetReplaySourceSnapshot();
         if (!IsDebriefReplayRequestCurrent(snapshot, request))
@@ -420,8 +465,7 @@ internal sealed class ReplayWindow : Window, IDisposable
         var framePolicy = ReplayFramePolicy.Resolve(
             this.IsOpen,
             this.combatGate.InCombat,
-            this.session?.IsPlaying == true,
-            this.closeReplayOnCombatStart);
+            this.session?.IsPlaying == true);
         if (this.disposed || !framePolicy.ShouldDraw)
         {
             this.IsOpen = false;
@@ -506,6 +550,49 @@ internal sealed class ReplayWindow : Window, IDisposable
 
         return textures;
     }
+    private static Dictionary<uint, ISharedImmediateTexture> LoadStatusEffectIcons(
+        ITextureProvider textureProvider,
+        ReplayGameDataCatalog gameDataCatalog)
+    {
+        ArgumentNullException.ThrowIfNull(textureProvider);
+        ArgumentNullException.ThrowIfNull(gameDataCatalog);
+        var statusIds = gameDataCatalog.StatusEffects.StatusIds;
+        var textures = new Dictionary<uint, ISharedImmediateTexture>(
+            statusIds.Length);
+        foreach (var statusId in statusIds)
+        {
+            if (!gameDataCatalog.TryGetStatusIconId(statusId, out var iconId))
+            {
+                Plugin.Log.Warning(
+                    "Replay Status {StatusId} ({StatusName}) has no native icon in the Lumina Status sheet; a placeholder will be used.",
+                    statusId,
+                    gameDataCatalog.GetStatusName(statusId));
+                continue;
+            }
+
+            try
+            {
+                textures.Add(
+                    statusId,
+                    textureProvider.GetFromGameIcon(
+                        new GameIconLookup(
+                            iconId,
+                            itemHq: false,
+                            hiRes: true)));
+            }
+            catch (Exception exception)
+            {
+                Plugin.Log.Error(
+                    exception,
+                    "Replay failed to load native Status icon {IconId} for Status {StatusId}; a placeholder will be used.",
+                    iconId,
+                    statusId);
+            }
+        }
+
+        return textures;
+    }
+
     internal static string? BuildCaptureFeatureWarning(PullRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
@@ -562,6 +649,13 @@ internal sealed class ReplayWindow : Window, IDisposable
                 warning,
                 "Killing Blow correlations cannot confirm complete ActionEffect capture.");
         }
+        if ((record.Features & CaptureFeatures.ActionNameSnapshot) == 0)
+        {
+            warning = AppendWarning(
+                warning,
+                "Recorded Action names are unavailable; reserved casts may fall back to Action #ID.");
+        }
+
 
 
         return warning is null ? null : $"{warning} 請使用目前版本重新錄製 Pull。";
@@ -644,8 +738,8 @@ internal sealed class ReplayWindow : Window, IDisposable
             ?? throw new InvalidOperationException("Replay load completed without a session or error.");
         this.session?.Pause();
         this.session = loadedSession;
+        this.gameDataCatalog.UseRecordedActionNames(loadedSession.Record);
         this.selectedPlayerStableActorId = null;
-        this.selectedDeathOriginalRecordedIndex = null;
         var sourceSnapshot = this.captureService.GetReplaySourceSnapshot();
         var sourceSummary = sourceSnapshot.LastCompletedPull?.CaptureId == loadedSession.Record.CaptureId
             ? sourceSnapshot.LastCompletedDebrief
@@ -802,8 +896,11 @@ internal sealed class ReplayWindow : Window, IDisposable
                 310);
             ImGui.TableNextRow();
 
+            ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, PanelRounding);
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, PanelBackgroundColor);
+
             ImGui.TableSetColumnIndex(0);
-            if (ImGui.BeginChild("##ReplayLeftPanel", new Vector2(0, mainHeight - 4)))
+            if (ImGui.BeginChild("##ReplayLeftPanel", new Vector2(0, mainHeight - 4), true))
             {
                 this.DrawLeftPanel(replay, presentation);
             }
@@ -811,7 +908,7 @@ internal sealed class ReplayWindow : Window, IDisposable
             ImGui.EndChild();
 
             ImGui.TableSetColumnIndex(1);
-            if (ImGui.BeginChild("##ReplayCenterPanel", new Vector2(0, mainHeight - 4)))
+            if (ImGui.BeginChild("##ReplayCenterPanel", new Vector2(0, mainHeight - 4), true))
             {
                 this.DrawArena(replay.Scene);
             }
@@ -819,16 +916,26 @@ internal sealed class ReplayWindow : Window, IDisposable
             ImGui.EndChild();
 
             ImGui.TableSetColumnIndex(2);
-            if (ImGui.BeginChild("##ReplayContextPanel", new Vector2(0, mainHeight - 4)))
+            if (ImGui.BeginChild("##ReplayContextPanel", new Vector2(0, mainHeight - 4), true))
             {
                 this.DrawContextPanel(replay, presentation);
             }
 
             ImGui.EndChild();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleVar();
             ImGui.EndTable();
         }
 
         this.DrawBottomTimeline(replay, presentation);
+    }
+
+    private static void DrawSectionHeader(string text)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, SectionHeaderColor);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+        ImGui.Spacing();
     }
 
     private void DrawLeftPanel(
@@ -838,15 +945,13 @@ internal sealed class ReplayWindow : Window, IDisposable
         DrawPullSummary(presentation.Summary);
         ImGui.Spacing();
         ImGui.Separator();
-        ImGui.TextUnformatted("PARTY");
-        ImGui.Spacing();
+        DrawSectionHeader("PARTY");
         this.DrawPartyList(replay, presentation);
     }
 
     private static void DrawPullSummary(DebriefSummary summary)
     {
-        ImGui.TextUnformatted("PULL SUMMARY");
-        ImGui.Spacing();
+        DrawSectionHeader("PULL SUMMARY");
         var pullNumber = summary.PullNumber is { } number
             ? $"Pull #{number}"
             : "Pull —";
@@ -860,19 +965,6 @@ internal sealed class ReplayWindow : Window, IDisposable
         ImGui.TextDisabled("Final Boss HP");
         ImGui.SameLine();
         ImGui.TextUnformatted(bossHp);
-
-        ImGui.TextDisabled("First Death");
-        ImGui.SameLine();
-        if (summary.FirstDeath is { } firstDeath)
-        {
-            var job = JobIconResources.GetAbbreviation(firstDeath.ClassJobId) ?? "Player";
-            ImGui.TextUnformatted(
-                $"{job} · {FormatTimestamp(firstDeath.TimestampMilliseconds)}");
-        }
-        else
-        {
-            ImGui.TextDisabled("—");
-        }
     }
 
     private void DrawPartyList(
@@ -885,26 +977,178 @@ internal sealed class ReplayWindow : Window, IDisposable
             return;
         }
 
+        var rowHeight = ResolveActorVitalsRowHeight();
         foreach (var actor in presentation.PartyActors)
         {
-            var job = JobIconResources.GetAbbreviation(actor.ClassJobId) ?? "PC";
             var stateAvailable = TryFindActorMarker(
                 replay.Scene.Actors,
                 actor.StableActorId,
                 out var marker);
-            var stateText = !stateAvailable
-                ? "—"
-                : FormatPartyHp(marker);
-            var label = $"{job,-4}  {stateText}##ReplayParty{actor.StableActorId}";
+            var origin = ImGui.GetCursorScreenPos();
+            var width = ImGui.GetContentRegionAvail().X;
             if (ImGui.Selectable(
-                    label,
-                    this.selectedPlayerStableActorId == actor.StableActorId))
+                    $"##ReplayParty{actor.StableActorId}",
+                    this.selectedPlayerStableActorId == actor.StableActorId,
+                    ImGuiSelectableFlags.None,
+                    new Vector2(0, rowHeight)))
             {
                 this.selectedPlayerStableActorId = actor.StableActorId;
-                this.selectedDeathOriginalRecordedIndex = null;
             }
 
+            if (stateAvailable && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    $"{ActorDisplayLabel(actor)}\n{FormatPartyHp(marker)}{FormatPartyBarrierSuffix(marker)}");
+            }
+
+            this.DrawActorVitalsRow(actor, stateAvailable, marker, origin, width);
         }
+    }
+
+    private static float ResolveActorVitalsRowHeight()
+    {
+        var textHeight = ImGui.GetTextLineHeight() * PartyJobTextScale;
+        return textHeight + PartyRowBarGap + PartyRowBarHeight + PartyRowBottomPadding;
+    }
+
+    private void DrawActorVitalsRow(
+        ActorRecord actor,
+        bool stateAvailable,
+        in ArenaActorMarker marker,
+        Vector2 origin,
+        float width)
+    {
+        width = Math.Max(0, width);
+        var drawList = ImGui.GetWindowDrawList();
+        var font = ImGui.GetFont();
+        var lineHeight = ImGui.GetTextLineHeight();
+        var jobFontSize = ImGui.GetFontSize() * PartyJobTextScale;
+        var valueFontSize = ImGui.GetFontSize() * PartyValueTextScale;
+        var textHeight = lineHeight * PartyJobTextScale;
+        var valueOffsetY = (textHeight - (lineHeight * PartyValueTextScale)) * 0.5f;
+        var isDead = stateAvailable && marker.IsDead;
+        var alpha = isDead ? PartyDeadRowAlpha : 1f;
+        var textColor = ImGui.GetColorU32(new Vector4(1, 1, 1, alpha));
+        var dimColor = ImGui.GetColorU32(new Vector4(0.62f, 0.64f, 0.70f, alpha));
+
+        var iconMinimum = new Vector2(
+            origin.X,
+            origin.Y + ((textHeight - PartyIconSize) * 0.5f));
+        if (actor.ClassJobId < this.jobIcons.Length
+            && this.jobIcons[(int)actor.ClassJobId] is { } icon
+            && icon.TryGetWrap(out var texture, out _)
+            && texture is not null)
+        {
+            drawList.AddImage(
+                texture.Handle,
+                iconMinimum,
+                iconMinimum + new Vector2(PartyIconSize),
+                Vector2.Zero,
+                Vector2.One,
+                ImGui.GetColorU32(new Vector4(1, 1, 1, alpha)));
+        }
+
+        var job = JobIconResources.GetAbbreviation(actor.ClassJobId) ?? "PC";
+        drawList.AddText(
+            font,
+            jobFontSize,
+            new Vector2(origin.X + PartyJobTextOffset, origin.Y),
+            textColor,
+            job);
+
+        var barMinimum = new Vector2(origin.X, origin.Y + textHeight + PartyRowBarGap);
+        var barMaximum = new Vector2(origin.X + width, barMinimum.Y + PartyRowBarHeight);
+        drawList.AddRectFilled(
+            barMinimum,
+            barMaximum,
+            ImGui.GetColorU32(PartyBarTrackColor),
+            PartyBarRounding);
+
+        if (!stateAvailable)
+        {
+            drawList.AddText(
+                font,
+                valueFontSize,
+                new Vector2(origin.X + PartyHpTextOffset, origin.Y + valueOffsetY),
+                dimColor,
+                "—");
+            return;
+        }
+
+        var (hpFraction, barrierFraction) = ResolvePartyBarFractions(
+            marker.CurrentHp,
+            marker.MaxHp,
+            marker.BarrierPercentage);
+        if (hpFraction > 0)
+        {
+            var hpColor = ResolvePartyHpColor(isDead);
+            hpColor.W *= alpha;
+            drawList.AddRectFilled(
+                barMinimum,
+                new Vector2(barMinimum.X + (width * hpFraction), barMaximum.Y),
+                ImGui.GetColorU32(hpColor),
+                PartyBarRounding);
+        }
+
+        // The barrier is anchored at the left edge and protrudes above the health
+        // bar, so it stays visible at full health like the in-game party list.
+        if (barrierFraction > 0)
+        {
+            var barrierColor = PartyBarrierColor;
+            barrierColor.W *= alpha;
+            var barrierTop = barMinimum.Y - PartyBarrierOverhang;
+            drawList.AddRectFilled(
+                new Vector2(barMinimum.X, barrierTop),
+                new Vector2(
+                    barMinimum.X + (width * barrierFraction),
+                    barrierTop + PartyBarrierBarHeight),
+                ImGui.GetColorU32(barrierColor),
+                PartyBarRounding);
+        }
+
+        if (marker.MaxHp == 0)
+        {
+            drawList.AddText(
+                font,
+                valueFontSize,
+                new Vector2(origin.X + PartyHpTextOffset, origin.Y + valueOffsetY),
+                dimColor,
+                "—");
+            return;
+        }
+
+        var hpText = isDead
+            ? "DEAD"
+            : string.Create(
+                CultureInfo.InvariantCulture,
+                $"{marker.CurrentHp:N0} / {marker.MaxHp:N0}");
+        drawList.AddText(
+            font,
+            valueFontSize,
+            new Vector2(origin.X + PartyHpTextOffset, origin.Y + valueOffsetY),
+            isDead ? ImGui.GetColorU32(PartyDeadTextColor) : textColor,
+            hpText);
+
+        var percentage = marker.CurrentHp * 100d / marker.MaxHp;
+        var percentText = string.Create(CultureInfo.InvariantCulture, $"{percentage:F1}%");
+        var percentWidth = ImGui.CalcTextSize(percentText).X * PartyValueTextScale;
+        drawList.AddText(
+            font,
+            valueFontSize,
+            new Vector2(origin.X + width - percentWidth, origin.Y + valueOffsetY),
+            dimColor,
+            percentText);
+    }
+
+    private void DrawActorVitalsPanel(
+        ActorRecord actor,
+        bool stateAvailable,
+        in ArenaActorMarker marker)
+    {
+        var origin = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        ImGui.Dummy(new Vector2(width, ResolveActorVitalsRowHeight()));
+        this.DrawActorVitalsRow(actor, stateAvailable, marker, origin, width);
     }
 
 
@@ -912,38 +1156,96 @@ internal sealed class ReplayWindow : Window, IDisposable
         ReplaySession replay,
         ReplayPresentationModel presentation)
     {
-        if (this.selectedDeathOriginalRecordedIndex is { } selectedDeathIndex
-            && presentation.TryGetDeath(selectedDeathIndex, out var death))
+        // Focus wins. Without a focused actor the panel follows the playhead and
+        // surfaces the death that is currently in scope.
+        var focusedActorId = this.selectedPlayerStableActorId;
+        if (ResolveDeathAtTimestamp(
+                presentation.Deaths,
+                focusedActorId,
+                replay.CurrentTimeMilliseconds,
+                DeathContextWindowMilliseconds) is { } recordedIndex
+            && presentation.TryGetDeath(recordedIndex, out var death))
         {
-            this.DrawDeathDetails(replay, death);
+            this.DrawDeathDetails(replay, death, presentation.BossActor);
             return;
         }
 
-        if (this.selectedPlayerStableActorId is { } selectedActorId
+        if (focusedActorId is { } selectedActorId
             && replay.TryGetActor(selectedActorId, out var actor))
         {
-            this.DrawActorSnapshot(replay, actor);
+            this.DrawActorSnapshot(replay, actor, presentation.BossActor);
             return;
         }
 
-        ImGui.TextUnformatted("CONTEXT");
-        ImGui.Spacing();
+        DrawSectionHeader("CONTEXT");
         ImGui.TextWrapped(
-            "Select a party member or a death marker to inspect the recorded state.");
+            "Scrub to a death, or select a party member to pin the recorded state.");
     }
 
-    private void DrawActorSnapshot(ReplaySession replay, ActorRecord actor)
+    /// <summary>
+    /// Resolves the death that the context panel should show at a playhead position:
+    /// the most recent death at or before the timestamp, within the trailing window.
+    /// When <paramref name="focusedActorStableId"/> is set only that actor's deaths
+    /// qualify, so a focused party member never shows somebody else's death.
+    /// </summary>
+    /// <remarks>Deaths are ordered by ascending timestamp.</remarks>
+    internal static int? ResolveDeathAtTimestamp(
+        ReadOnlySpan<ReplayDeathItem> deaths,
+        int? focusedActorStableId,
+        long timestampMilliseconds,
+        long windowMilliseconds)
     {
-        var job = JobIconResources.GetAbbreviation(actor.ClassJobId) ?? "Player";
-        ImGui.TextUnformatted(job);
-        ImGui.Separator();
-        if (TryFindActorMarker(replay.Scene.Actors, actor.StableActorId, out var marker))
+        int? resolved = null;
+        foreach (ref readonly var death in deaths)
         {
-            ImGui.TextDisabled("HP");
-            ImGui.TextUnformatted(
-                marker.MaxHp == 0
-                    ? $"{marker.CurrentHp:N0} / —"
-                    : $"{marker.CurrentHp:N0} / {marker.MaxHp:N0}  ({marker.CurrentHp * 100f / marker.MaxHp:F1}%)");
+            var deathTimestamp = death.Correlation.DeathTimestampMilliseconds;
+            if (deathTimestamp > timestampMilliseconds)
+            {
+                break;
+            }
+
+            if (timestampMilliseconds - deathTimestamp > windowMilliseconds)
+            {
+                continue;
+            }
+
+            if (focusedActorStableId is { } actorId
+                && death.Actor.StableActorId != actorId)
+            {
+                continue;
+            }
+
+            resolved = death.Correlation.DeathOriginalRecordedIndex;
+        }
+
+        return resolved;
+    }
+
+    private void DrawActorSnapshot(
+        ReplaySession replay,
+        ActorRecord actor,
+        ActorRecord? bossActor)
+    {
+        var stateAvailable = TryFindActorMarker(
+            replay.Scene.Actors,
+            actor.StableActorId,
+            out var marker);
+        this.DrawActorVitalsPanel(actor, stateAvailable, marker);
+        ImGui.Separator();
+
+        if (stateAvailable)
+        {
+            ImGui.TextDisabled("Barrier");
+            if (marker.BarrierPercentage is { } barrierPercentage)
+            {
+                ImGui.TextUnformatted(
+                    FormatBarrierAmount(marker.MaxHp, barrierPercentage));
+            }
+            else
+            {
+                ImGui.TextDisabled("—  Not recorded");
+            }
+
             ImGui.Spacing();
             ImGui.TextDisabled("State");
             ImGui.TextUnformatted(marker.IsDead ? "Dead" : "Alive");
@@ -957,10 +1259,14 @@ internal sealed class ReplayWindow : Window, IDisposable
         this.DrawActiveMitigations(
             replay,
             actor.StableActorId,
-            replay.CurrentTimeMilliseconds);
+            replay.CurrentTimeMilliseconds,
+            bossActor);
     }
 
-    private void DrawDeathDetails(ReplaySession replay, in ReplayDeathItem death)
+    private void DrawDeathDetails(
+        ReplaySession replay,
+        in ReplayDeathItem death,
+        ActorRecord? bossActor)
     {
         var correlation = death.Correlation;
         var job = JobIconResources.GetAbbreviation(death.Actor.ClassJobId) ?? "Player";
@@ -997,9 +1303,7 @@ internal sealed class ReplayWindow : Window, IDisposable
 
         if (correlation.KillingBlowCandidate is { } candidate)
         {
-            ImGui.TextUnformatted(this.gameDataCatalog.GetActionName(candidate.ActionId));
-            ImGui.SameLine();
-            ImGui.TextUnformatted($"{candidate.Amount:N0}");
+            this.DrawKillingBlowCard(replay, candidate);
         }
         else
         {
@@ -1009,20 +1313,33 @@ internal sealed class ReplayWindow : Window, IDisposable
         if (correlation.EstimatedHpBeforeHit is { } hpBefore)
         {
             ImGui.Spacing();
-            ImGui.TextDisabled("Estimated HP Before Hit");
+            ImGui.TextDisabled("HP Before Hit");
             ImGui.TextUnformatted($"{hpBefore:N0}");
+        }
+
+        DrawBarrierDisposition(correlation.Barrier);
+
+        if (correlation.EstimatedEffectivePoolBeforeHit is { } pool
+            && correlation.Barrier.StoodAgainstTheKillingBlow)
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled("Effective Pool");
+            ImGui.TextUnformatted($"{pool:N0}");
         }
 
         if (correlation.EstimatedOverkill is { } overkill)
         {
             ImGui.Spacing();
-            ImGui.TextDisabled("Estimated Overkill");
-            ImGui.TextUnformatted($"≈{overkill:N0}");
+            ImGui.TextDisabled(
+                correlation.Barrier.StoodAgainstTheKillingBlow
+                    ? "Estimated Overkill (vs pool)"
+                    : "Estimated Overkill");
+            ImGui.TextUnformatted($"~{overkill:N0}");
         }
 
         ImGui.Spacing();
         ImGui.Separator();
-        ImGui.TextUnformatted("LAST CAPTURED HITS");
+        DrawSectionHeader("LAST CAPTURED HITS");
         if (correlation.LastHits.Length == 0)
         {
             ImGui.TextDisabled("—");
@@ -1046,27 +1363,239 @@ internal sealed class ReplayWindow : Window, IDisposable
         this.DrawActiveMitigations(
             replay,
             death.Actor.StableActorId,
-            correlation.DeathTimestampMilliseconds);
+            correlation.DeathTimestampMilliseconds,
+            bossActor);
+    }
+
+    /// <summary>
+    /// States what the recorded barrier did. "Consumed" and "Expired" are read from the
+    /// status duration remaining when the barrier ended, not inferred from the damage.
+    /// </summary>
+    private static void DrawBarrierDisposition(in DeathBarrierObservation barrier)
+    {
+        if (barrier.Disposition == BarrierDisposition.None)
+        {
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Barrier");
+        if (barrier.Disposition == BarrierDisposition.NotRecorded)
+        {
+            ImGui.TextDisabled("—  Not recorded by this capture");
+            return;
+        }
+
+        ImGui.TextUnformatted($"~{barrier.AmountAtDeath:N0}  ({barrier.PercentageAtDeath}%)");
+        ImGui.TextColored(
+            new Vector4(0.98f, 0.82f, 0.35f, 1),
+            "Standing on the last sample before death");
+    }
+
+    /// <summary>
+    /// Renders the recorded killing blow as the focal element of the death panel:
+    /// the action, the recorded amount, and the recorded source actor.
+    /// </summary>
+    private void DrawKillingBlowCard(ReplaySession replay, in CorrelatedDamageEvent candidate)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var font = ImGui.GetFont();
+        var baseFontSize = ImGui.GetFontSize();
+        var lineHeight = ImGui.GetTextLineHeight();
+        var actionHeight = lineHeight * KillingBlowActionTextScale;
+        var amountHeight = lineHeight * KillingBlowAmountTextScale;
+        var sourceHeight = lineHeight * KillingBlowSourceTextScale;
+        var cardHeight = (KillingBlowCardPadding * 2) + actionHeight + amountHeight + sourceHeight;
+
+        var origin = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        ImGui.Dummy(new Vector2(width, cardHeight));
+
+        drawList.AddRectFilled(
+            origin,
+            origin + new Vector2(width, cardHeight),
+            ImGui.GetColorU32(KillingBlowCardColor),
+            KillingBlowCardRounding);
+        drawList.AddRect(
+            origin,
+            origin + new Vector2(width, cardHeight),
+            ImGui.GetColorU32(KillingBlowCardBorderColor),
+            KillingBlowCardRounding);
+
+        var textX = origin.X + KillingBlowCardPadding;
+        var textY = origin.Y + KillingBlowCardPadding;
+        drawList.AddText(
+            font,
+            baseFontSize * KillingBlowActionTextScale,
+            new Vector2(textX, textY),
+            ImGui.GetColorU32(new Vector4(1, 1, 1, 1)),
+            this.gameDataCatalog.GetActionName(candidate.ActionId));
+
+        textY += actionHeight;
+        drawList.AddText(
+            font,
+            baseFontSize * KillingBlowAmountTextScale,
+            new Vector2(textX, textY),
+            ImGui.GetColorU32(KillingBlowAmountColor),
+            candidate.Amount.ToString("N0", CultureInfo.InvariantCulture));
+
+        // Recorded source actor, or an explicit statement that it was not resolved.
+        var source = candidate.SourceStableActorId is { } sourceStableActorId
+            && replay.TryGetActor(sourceStableActorId, out var sourceActor)
+                ? $"from  {ActorDisplayLabel(sourceActor)}"
+                : "Source actor not resolved";
+        textY += amountHeight;
+        drawList.AddText(
+            font,
+            baseFontSize * KillingBlowSourceTextScale,
+            new Vector2(textX, textY),
+            ImGui.GetColorU32(new Vector4(0.68f, 0.70f, 0.76f, 1)),
+            source);
     }
 
     private void DrawActiveMitigations(
         ReplaySession replay,
         int actorId,
-        long timestampMilliseconds)
+        long timestampMilliseconds,
+        ActorRecord? bossActor)
     {
-        ImGui.TextUnformatted("ACTIVE BUFF / MITIGATION");
+        DrawSectionHeader("ACTIVE MITIGATION / HoT");
+        if (ImGui.Checkbox("顯示 HoT 效果", ref this.showHotEffects))
+        {
+            this.saveShowHotEffectsSetting(this.showHotEffects);
+        }
+
+        Span<ActiveMitigationStatus> activeStatuses =
+            stackalloc ActiveMitigationStatus[MaximumDisplayedMitigations];
+        var events = replay.Timeline.Events;
+        var activeBossActorId = ResolveActiveBossActorId(
+            replay.Scene.Actors,
+            bossActor);
+        var activeCount = CollectActiveMitigations(
+            events,
+            actorId,
+            activeBossActorId,
+            timestampMilliseconds,
+            this.gameDataCatalog.StatusEffects,
+            this.showHotEffects,
+            activeStatuses);
+        var columns = ResolveMitigationGridColumnCount(
+            ImGui.GetContentRegionAvail().X);
+        for (var index = 0; index < activeCount; index++)
+        {
+            if (index > 0 && index % columns != 0)
+            {
+                ImGui.SameLine(0, MitigationTileGap);
+            }
+
+            var activeStatus = activeStatuses[index];
+            float? remaining = null;
+            if (TryResolveStatusRemainingSeconds(
+                    events,
+                    activeStatus.ActiveEventIndex,
+                    timestampMilliseconds,
+                    out var remainingSeconds))
+            {
+                remaining = remainingSeconds;
+            }
+
+            var statusParam = this.gameDataCatalog.HasStacks(activeStatus.StatusId)
+                ? events[activeStatus.ActiveEventIndex].ObservedEvent.StatusParam ?? 0
+                : (ushort)0;
+            this.DrawMitigationStatusTile(
+                activeStatus.StatusId,
+                statusParam,
+                remaining,
+                activeStatus.TargetKind);
+        }
+
+        if (activeCount == 0)
+        {
+            ImGui.TextDisabled(
+                this.showHotEffects
+                    ? "No recorded mitigation or HoT active."
+                    : "No recorded mitigation active.");
+        }
+    }
+
+    internal static int ResolveMitigationGridColumnCount(float availableWidth) =>
+        Math.Max(
+            1,
+            (int)MathF.Floor(
+                (Math.Max(0, availableWidth) + MitigationTileGap)
+                / (MitigationTileWidth + MitigationTileGap)));
+
+    internal static int CollectActiveMitigations(
+        ReadOnlySpan<ReplayTimelineEntry> events,
+        int playerActorId,
+        int? bossActorId,
+        long timestampMilliseconds,
+        ReplayStatusEffectDatabase statusEffects,
+        bool showHealingOverTime,
+        Span<ActiveMitigationStatus> destination)
+    {
+        if (timestampMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timestampMilliseconds));
+        }
+        ArgumentNullException.ThrowIfNull(statusEffects);
+
+        var count = CollectActiveMitigationsForActor(
+            events,
+            playerActorId,
+            timestampMilliseconds,
+            MitigationTargetKind.Player,
+            statusEffects,
+            showHealingOverTime,
+            destination);
+        if (bossActorId is { } bossId
+            && bossId != playerActorId
+            && count < destination.Length)
+        {
+            count += CollectActiveMitigationsForActor(
+                events,
+                bossId,
+                timestampMilliseconds,
+                MitigationTargetKind.Boss,
+                statusEffects,
+                showHealingOverTime,
+                destination[count..]);
+        }
+
+        return count;
+    }
+
+    private static int CollectActiveMitigationsForActor(
+        ReadOnlySpan<ReplayTimelineEntry> events,
+        int actorId,
+        long timestampMilliseconds,
+        MitigationTargetKind targetKind,
+        ReplayStatusEffectDatabase statusEffects,
+        bool showHealingOverTime,
+        Span<ActiveMitigationStatus> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
         Span<uint> seenStatusIds = stackalloc uint[64];
         Span<ulong> seenSources = stackalloc ulong[64];
         var seenCount = 0;
-        var displayedCount = 0;
-        var events = replay.Timeline.Events;
-        for (var index = events.Length - 1; index >= 0 && seenCount < seenStatusIds.Length; index--)
+        var activeCount = 0;
+        for (var index = events.Length - 1;
+             index >= 0 && seenCount < seenStatusIds.Length;
+             index--)
         {
             var entry = events[index];
             if (entry.TimestampMilliseconds > timestampMilliseconds
                 || entry.ObservedEvent.StableActorId != actorId
                 || entry.ObservedEvent.StatusId is not { } statusId
-                || !this.gameDataCatalog.IsMitigation(statusId))
+                || (targetKind == MitigationTargetKind.Player
+                    ? !statusEffects.ShouldDisplayForPlayer(
+                        statusId,
+                        showHealingOverTime)
+                    : !statusEffects.ShouldDisplayForBoss(statusId)))
             {
                 continue;
             }
@@ -1098,33 +1627,113 @@ internal sealed class ReplayWindow : Window, IDisposable
                 continue;
             }
 
-            ImGui.TextUnformatted(this.gameDataCatalog.GetStatusName(statusId));
-            ImGui.SameLine();
-            if (TryResolveStatusRemainingSeconds(
-                    events,
-                    index,
-                    timestampMilliseconds,
-                    out var remainingSeconds))
-            {
-                ImGui.TextDisabled($"{remainingSeconds:F1}s");
-            }
-            else
-            {
-                ImGui.TextDisabled("—");
-            }
-
-            displayedCount++;
-            if (displayedCount >= 8)
+            destination[activeCount++] = new ActiveMitigationStatus(
+                statusId,
+                index,
+                targetKind);
+            if (activeCount == destination.Length)
             {
                 break;
             }
         }
 
-        if (displayedCount == 0)
+        return activeCount;
+    }
+    private void DrawMitigationStatusTile(
+        uint statusId,
+        ushort statusParam,
+        float? remainingSeconds,
+        MitigationTargetKind targetKind)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var origin = ImGui.GetCursorScreenPos();
+        var lineHeight = ImGui.GetTextLineHeight();
+        var tileHeight = MitigationIconSize + lineHeight + 2;
+        ImGui.Dummy(new Vector2(MitigationTileWidth, tileHeight));
+
+        var iconOrigin = origin
+            + new Vector2((MitigationTileWidth - MitigationIconSize) * 0.5f, 0);
+        var iconMaximum = iconOrigin + new Vector2(MitigationIconSize);
+        if (this.statusEffectIcons.TryGetValue(statusId, out var icon)
+            && icon.TryGetWrap(out var texture, out _)
+            && texture is not null)
         {
-            ImGui.TextDisabled("No recorded mitigation active.");
+            drawList.AddImage(
+                texture.Handle,
+                iconOrigin,
+                iconMaximum,
+                Vector2.Zero,
+                Vector2.One,
+                ImGui.GetColorU32(Vector4.One));
+        }
+        else
+        {
+            drawList.AddRectFilled(
+                iconOrigin,
+                iconMaximum,
+                ImGui.GetColorU32(new Vector4(0.12f, 0.13f, 0.16f, 1)),
+                PartyBarRounding);
+            drawList.AddRect(
+                iconOrigin,
+                iconMaximum,
+                ImGui.GetColorU32(new Vector4(0.34f, 0.36f, 0.42f, 1)),
+                PartyBarRounding);
+        }
+
+        if (targetKind == MitigationTargetKind.Boss)
+        {
+            drawList.AddRect(
+                iconOrigin - Vector2.One,
+                iconMaximum + Vector2.One,
+                ImGui.GetColorU32(new Vector4(1, 0.52f, 0.28f, 1)),
+                PartyBarRounding);
+        }
+
+        if (statusParam > 0)
+        {
+            var stackText = statusParam.ToString(CultureInfo.InvariantCulture);
+            var stackSize = ImGui.CalcTextSize(stackText);
+            var stackPosition = iconMaximum - stackSize - new Vector2(1, 0);
+            drawList.AddText(
+                stackPosition + Vector2.One,
+                ImGui.GetColorU32(new Vector4(0, 0, 0, 1)),
+                stackText);
+            drawList.AddText(
+                stackPosition,
+                ImGui.GetColorU32(Vector4.One),
+                stackText);
+        }
+
+        var durationText = remainingSeconds is { } value
+            ? string.Create(CultureInfo.InvariantCulture, $"{value:F1}")
+            : "—";
+        var durationSize = ImGui.CalcTextSize(durationText);
+        drawList.AddText(
+            new Vector2(
+                origin.X + ((MitigationTileWidth - durationSize.X) * 0.5f),
+                iconMaximum.Y + 2),
+            ImGui.GetColorU32(new Vector4(0.72f, 0.76f, 0.84f, 1)),
+            durationText);
+
+        if (ImGui.IsItemHovered())
+        {
+            var target = targetKind == MitigationTargetKind.Boss
+                ? "Boss debuff"
+                : "Player buff";
+            var duration = remainingSeconds is { } remaining
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{remaining:F1}s remaining")
+                : "Duration unavailable";
+            var stack = statusParam > 0
+                ? $"\nStacks: {statusParam}"
+                : string.Empty;
+            ImGui.SetTooltip(
+                $"{this.gameDataCatalog.GetStatusName(statusId)}\n" +
+                $"{duration} · {target}{stack}");
         }
     }
+
 
     internal static bool TryResolveStatusRemainingSeconds(
         ReadOnlySpan<ReplayTimelineEntry> events,
@@ -1785,7 +2394,7 @@ internal sealed class ReplayWindow : Window, IDisposable
         ReplayPresentationModel presentation)
     {
         ImGui.Separator();
-        if (ImGui.Button("◀ 1s##ReplayBack"))
+        if (ImGui.Button("<< 1s##ReplayBack"))
         {
             replay.Seek(replay.CurrentTimeMilliseconds - 1_000);
             replay.Pause();
@@ -1805,7 +2414,7 @@ internal sealed class ReplayWindow : Window, IDisposable
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("1s ▶##ReplayForward"))
+        if (ImGui.Button("1s >>##ReplayForward"))
         {
             replay.Seek(replay.CurrentTimeMilliseconds + 1_000);
             replay.Pause();
@@ -1826,7 +2435,7 @@ internal sealed class ReplayWindow : Window, IDisposable
         ImGui.TextUnformatted(
             $"{FormatTimestamp(replay.CurrentTimeMilliseconds)} / {FormatTimestamp(replay.DurationMilliseconds)}");
         this.DrawTimelineControl(replay, presentation);
-        ImGui.TextUnformatted("DEATH QUICK JUMP");
+        DrawSectionHeader("DEATH QUICK JUMP");
         this.DrawDeathQuickJumps(replay, presentation);
     }
 
@@ -1943,8 +2552,6 @@ internal sealed class ReplayWindow : Window, IDisposable
     private void SelectDeath(ReplaySession replay, in ReplayDeathItem death)
     {
         this.selectedPlayerStableActorId = death.Actor.StableActorId;
-        this.selectedDeathOriginalRecordedIndex =
-            death.Correlation.DeathOriginalRecordedIndex;
         replay.Seek(death.Correlation.DeathTimestampMilliseconds);
         replay.Pause();
     }
@@ -2358,6 +2965,57 @@ internal sealed class ReplayWindow : Window, IDisposable
     internal static bool ShouldDrawEnemyVitals(in ArenaActorMarker marker) =>
         marker.Kind == ArenaActorMarkerKind.BattleNpc && marker.IsTargetable;
 
+    internal static int? ResolveActiveBossActorId(
+        ReadOnlySpan<ArenaActorMarker> actors,
+        ActorRecord? referenceBoss)
+    {
+        int? matchingActorId = null;
+        uint matchingMaxHp = 0;
+        int? fallbackActorId = null;
+        uint fallbackMaxHp = 0;
+        foreach (ref readonly var marker in actors)
+        {
+            if (!ShouldDrawEnemyVitals(marker) || marker.MaxHp == 0)
+            {
+                continue;
+            }
+
+            var actorId = marker.Actor.StableActorId;
+            if (marker.MaxHp > fallbackMaxHp
+                || (marker.MaxHp == fallbackMaxHp
+                    && actorId < fallbackActorId.GetValueOrDefault(int.MaxValue)))
+            {
+                fallbackActorId = actorId;
+                fallbackMaxHp = marker.MaxHp;
+            }
+
+            if (referenceBoss is null
+                || !MatchesRecordedBossIdentity(marker.Actor, referenceBoss)
+                || (marker.MaxHp < matchingMaxHp
+                    || (marker.MaxHp == matchingMaxHp
+                        && actorId >= matchingActorId.GetValueOrDefault(int.MaxValue))))
+            {
+                continue;
+            }
+
+            matchingActorId = actorId;
+            matchingMaxHp = marker.MaxHp;
+        }
+
+        return matchingActorId ?? fallbackActorId;
+    }
+
+    private static bool MatchesRecordedBossIdentity(
+        ActorRecord actor,
+        ActorRecord referenceBoss) =>
+        actor.StableActorId == referenceBoss.StableActorId
+        || (referenceBoss.BaseId != 0 && actor.BaseId == referenceBoss.BaseId)
+        || (!string.IsNullOrWhiteSpace(referenceBoss.Name)
+            && string.Equals(
+                actor.Name,
+                referenceBoss.Name,
+                StringComparison.Ordinal));
+
     internal static string FormatEnemyHudHpPercentage(in ArenaActorMarker marker)
     {
         if (marker.MaxHp == 0)
@@ -2388,6 +3046,32 @@ internal sealed class ReplayWindow : Window, IDisposable
             $"{Math.Min(progress, total):F1} / {total:F1}s");
     }
 
+    /// <summary>
+    /// Resolves party health-bar geometry as fractions of the full bar width.
+    /// Both fractions are measured from the left edge: health fills the bar and the
+    /// barrier overlays the upper strip, so a barrier stays visible at full health.
+    /// Each fraction is clamped to the bar width.
+    /// </summary>
+    internal static (float HpFraction, float BarrierFraction) ResolvePartyBarFractions(
+        uint currentHp,
+        uint maxHp,
+        byte? barrierPercentage)
+    {
+        if (maxHp == 0)
+        {
+            return (0, 0);
+        }
+
+        var hpFraction = Math.Clamp(currentHp / (float)maxHp, 0, 1);
+        var barrierFraction = barrierPercentage is { } percentage && percentage > 0
+            ? Math.Clamp(percentage / 100f, 0, 1)
+            : 0;
+        return (hpFraction, barrierFraction);
+    }
+
+    internal static Vector4 ResolvePartyHpColor(bool isDead) =>
+        isDead ? PartyDeadBarColor : PartyHpColor;
+
     internal static string FormatPartyHp(in ArenaActorMarker marker)
     {
         if (marker.MaxHp == 0)
@@ -2400,6 +3084,34 @@ internal sealed class ReplayWindow : Window, IDisposable
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{state}{marker.CurrentHp:N0} / {marker.MaxHp:N0} · {percentage:F1}%");
+    }
+
+    internal static string FormatPartyBarrierSuffix(in ArenaActorMarker marker)
+    {
+        if (marker.BarrierPercentage is not > 0)
+        {
+            return string.Empty;
+        }
+
+        return $"  ·  Barrier {FormatBarrierAmount(marker.MaxHp, marker.BarrierPercentage.Value)}";
+    }
+
+    /// <summary>
+    /// Formats a recorded barrier. Stacked shields can exceed the actor's maximum health,
+    /// so the percentage is reported as recorded rather than capped at 100.
+    /// </summary>
+    internal static string FormatBarrierAmount(uint maxHp, byte barrierPercentage)
+    {
+
+        if (maxHp == 0)
+        {
+            return $"{barrierPercentage}%";
+        }
+
+        var approximateAmount = (uint)(((ulong)maxHp * barrierPercentage) / 100);
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"~{approximateAmount:N0}  ({barrierPercentage}%)");
     }
 
     internal static string ActorDisplayLabel(ActorRecord actor)

@@ -198,14 +198,43 @@ public sealed class ArenaSceneTests
         Assert.Equal([player, boss], scene.Actors.ToArray().Select(marker => marker.Actor));
     }
 
+    [Fact]
+    public void BarrierStateRequiresCaptureFeatureAndUsesRecordedSampleBoundary()
+    {
+        var actor = CreateActor(1, "Pc", 0x1001);
+        var frames = new[]
+        {
+            CreateFrame(0, CreateSample(1, x: 100, z: 100, barrierPercentage: 20)),
+            CreateFrame(100, CreateSample(1, x: 100, z: 100, barrierPercentage: 5)),
+        };
+
+        var currentRecord = CreateRecord(
+            actors: [actor],
+            frames: frames,
+            features: CaptureFeatures.BarrierState);
+        var currentSession = new ReplaySession(currentRecord);
+        currentSession.Seek(99);
+        Assert.Single(currentSession.Scene.Actors.ToArray());
+        Assert.Equal((byte)20, currentSession.Scene.Actors[0].BarrierPercentage);
+        currentSession.Seek(100);
+        Assert.Single(currentSession.Scene.Actors.ToArray());
+        Assert.Equal((byte)5, currentSession.Scene.Actors[0].BarrierPercentage);
+
+        var legacySession = new ReplaySession(CreateRecord(actors: [actor], frames: frames));
+        Assert.Single(legacySession.Scene.Actors.ToArray());
+        Assert.Null(legacySession.Scene.Actors[0].BarrierPercentage);
+    }
+
     private static PullRecord CreateRecord(
         ActorRecord[]? actors = null,
         PositionFrame[]? frames = null,
         WaymarkFrame[]? waymarkFrames = null,
         uint territoryType = 1234,
-        uint mapId = 5678) =>
+        uint mapId = 5678,
+        CaptureFeatures features = CaptureFeatures.None) =>
         new()
         {
+            Features = features,
             CaptureId = Guid.Parse("8a4ca528-e494-4011-be23-800514185f0a"),
             StartedAtUtc = DateTimeOffset.Parse("2026-08-09T00:00:00Z"),
             EndedAtUtc = DateTimeOffset.Parse("2026-08-09T00:10:00Z"),
@@ -253,7 +282,8 @@ public sealed class ArenaSceneTests
         bool dead = false,
         bool targetable = true,
         float hitboxRadius = 0,
-        bool omnidirectional = false) =>
+        bool omnidirectional = false,
+        byte barrierPercentage = 0) =>
         new()
         {
             StableActorId = stableActorId,
@@ -264,6 +294,7 @@ public sealed class ArenaSceneTests
             HitboxRadius = hitboxRadius,
             CurrentHp = dead ? 0u : 100u,
             MaxHp = 100,
+            BarrierPercentage = barrierPercentage,
             IsDead = dead,
             IsTargetable = targetable,
             IsOmnidirectional = omnidirectional,

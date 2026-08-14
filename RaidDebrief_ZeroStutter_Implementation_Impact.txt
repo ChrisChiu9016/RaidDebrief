@@ -1,0 +1,730 @@
+Raid Debrief：10 Hz 完整資料提取優先方案與 Zero-Allocation 條件式規劃
+原始整理：2026-08-12；狀態更新：2026-08-14
+狀態：第一部分已實作並自動化；第二部分仍由實機 profiling gate 控制
+文件定位
+
+本文件只定義兩個層級：
+
+第一部分：目前應優先實作的 10 Hz 完整資料提取。
+第二部分：保留 Zero-Allocation 的實作空間，但只有實機 profiling 證明仍有必要時才進行。
+
+目前不應把 10 Hz、公開 Core 模型、Action Effect threading、Buffer ownership、Channel 與 JSON 格式一次全部重寫。第一階段完成並實測前，不啟動第二部分的配置最佳化。
+
+2026-08-14 實作對照：
+
+- 目前 API 為 CaptureService.BeginFrameworkUpdate → FrameworkCaptureDecision，
+  LiveDataProbe 只在 decision／Probe refresh 要求時掃描，再以
+  SubmitFrameworkSample 提交；失敗使用 CancelFrameworkSample。
+- CaptureSamplingScheduler 是 active Pull 的唯一 100 ms timeline owner；
+  FrameworkScanCoordinator 管理 Capture／Probe 的單次完整掃描。
+- Pull start 同 Framework callback 立即取樣；低 FPS 只提交一個當下 Frame
+  並記錄 gaps。
+- 未錄製且 Probe 關閉時不掃描 Party／ObjectTable／StatusList；Probe 開啟且
+  位於 duty instance 時最多 10 Hz；錄製時 Capture sample 擁有並共用該次掃描。
+- StatusList 單次取得、slot＋GameObjectId 名稱快取、lazy diagnostic string
+  已完成。Action Effect threading、公開 Core 模型與全字串 JSON 未擴張。
+- 自動化基準為 Core 99／Plugin 169／UI 4；三份 recorded fixtures 完整
+  Replay 通過。最新 x64 DLL 已 post-build hot reload。
+- current-build Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` 已完成約
+  13.9 分鐘的 `DutyWiped` finalization／validation，並由 Runtime Replay
+  以相同 CaptureId、frame／event 數直接載入；其輸出檢查與修改前後
+  callback allocation／GC／frame-time profiling 尚未完成。因此「zero stutter」
+  仍是目標名稱，不是驗證結論。
+
+下方第一部分保留原始設計／影響分析；其中「目前每個 Framework.Update
+完整掃描」描述的是修改前 baseline，不是現況。
+
+
+總體決策
+
+立即採用：
+
+1. 保持正式 PositionFrame／Actor state 記錄約 10 Hz。
+2. 將 PartyList、ObjectTable、StatusList 的完整遊戲資料提取由每個 Framework.Update 降為每 100 ms 或必要的強制取樣。
+3. Pull lifecycle、戰鬥狀態與 instance 狀態仍逐 Framework.Update 處理。
+4. Pull 開始時在同一個 Framework callback 建立 ActiveCapture 並寫入第一個完整樣本。
+5. Action Effect 維持事件驅動，不因 10 Hz 改造而改變。
+6. Runtime Capture 維持純 RAM；自動 Capture 不轉 JSON。
+7. 保持目前 PullRecord、Replay、Analyzer 與 JSON 契約，包括 ActionNames 快照。
+8. 加入足以比較取樣前後差異的 callback 時間、配置與 Gap profiling。
+
+目前不要求：
+
+1. 所有 callback 絕對低於 0.1 ms。
+2. 所有採樣、事件或 Action Effect callback 都配置 0 bytes。
+3. 立即加入 Channel。
+4. 立即把 Capture 全面改為 struct／slab／segmented buffer。
+5. 修改公開 PullRecord 或 JSON schema。
+6. Stream-based JSON 與 10 Hz 同時上線。
+
+============================================================
+第一部分：10 Hz 完整資料提取
+============================================================
+
+一、目前實際執行方式
+
+目前 LiveDataProbe.OnFrameworkUpdate() 每次都執行：
+
+Framework.Update（通常接近遊戲 FPS）
+  ├─ CaptureClientState
+  ├─ CaptureParty
+  ├─ CaptureActors
+  │   ├─ 掃描 ObjectTable
+  │   ├─ 讀取 Actor／HP／Position／Rotation／Cast
+  │   └─ 掃描每個 BattleChara 的 StatusList
+  └─ CaptureService.RecordFrameworkSnapshot
+      └─ ActiveCapture.TryRecordFrame 以 100 ms gate 決定是否保存
+
+因此目前必須區分：
+
+- 正式 PositionFrame／Actor state 寫入：約 10 Hz。
+- Party／Actor／Status 完整提取：接近每個 Framework.Update。
+- Cast／Status transition 偵測：只在正式 Frame 被接受時執行，因此目前保存精度也是約 10 Hz。
+- Waymark／Target Marker：只在正式 Frame 被接受時讀取，約 10 Hz。
+- Action Effect：native hook 事件驅動。
+- Duty Wipe／Duty Complete：IDutyState 事件驅動。
+- Replay combat gate／Debrief gate：由 Plugin.DrawUi 的 UiBuilder.Draw 更新，不屬於 Capture 取樣 gate。
+
+目前效能改善重點不是降低 Replay 的正式記錄率，而是不要為了保存 10 Hz 資料，先在每個遊戲 Frame 重複完整掃描。
+
+二、第一階段目標流程
+
+建議流程：
+
+Framework.Update（每幀）
+  ├─ CaptureClientState
+  │   ├─ LoggedIn
+  │   ├─ InCombat
+  │   ├─ Duty instance condition
+  │   ├─ Territory／Map／Instance
+  │   └─ Local player identity（如仍需要）
+  ├─ CaptureService 更新 Pull lifecycle
+  ├─ CaptureService 判斷是否需要正式完整樣本
+  └─ 若需要完整樣本：
+      ├─ CaptureParty
+      ├─ CaptureActors
+      ├─ Capture StatusList
+      ├─ 保存 PositionFrame
+      ├─ 偵測 Cast／Status／Death transition
+      ├─ 保存 Waymark／Target Marker transition
+      └─ 對尚未保存名稱的施放 Action 執行 Action name snapshot
+
+UiBuilder.Draw（每個 UI frame，維持現況）
+  ├─ ReplayWindow.UpdateUiState(InCombat, ...)
+  ├─ DebriefSummaryWindow.Update(...)
+  └─ WindowSystem.Draw()
+
+Action Effect hook（事件發生時，維持現況）
+  ├─ callback 內同步驗證與複製 native 資料
+  ├─ CaptureService.RecordActionEffect
+  └─ 呼叫 Original
+
+三、正式 Capture 取樣只有一個 owner
+
+正式 Capture 的 100 ms 排程應由 CaptureService／ActiveCapture 單一管理，LiveDataProbe 不再先完整掃描再讓 ActiveCapture 拒絕樣本。
+
+建議將目前 RecordFrameworkSnapshot 的責任拆成兩個明確步驟：
+
+1. ObserveFrameworkState
+   - 輸入輕量 Client／combat／instance 狀態。
+   - 更新 automatic lifecycle 與三秒脫戰 debounce。
+   - 必要時建立 ActiveCapture 或開始 Finalize。
+   - 回傳本 callback 是否需要完整遊戲資料。
+
+2. RecordFrameworkSample
+   - 只在 decision 要求時呼叫。
+   - 同步消耗本次 Party／Actor／Status snapshot。
+   - 保存 Frame、事件、Waymark、Target Marker 與 Action name snapshot。
+
+介面名稱可以依現有命名調整，但必須保持以下不變量：
+
+- Capture timeline 的 100 ms gate 只有一個 owner。
+- LiveDataProbe 不自行決定正式 Capture 的 timestamp。
+- 不會先完整掃描再由 CaptureService 回傳「本幀不需要」。
+- 低 FPS 時一個 Framework callback 最多寫入一個真實樣本，不補寫不存在的假 Frame。
+- Gap 依真實樣本間隔計算。
+
+Probe-only 更新可以有獨立的顯示刷新節奏，但不得控制或改變正式 Capture timeline。
+
+四、Pull 開始必須同 callback 強制取樣
+
+偵測 InCombat=false → true 時，同一個 Framework callback 必須：
+
+1. 建立新的 ActiveCapture。
+2. 將本次 decision 標示為 CaptureActorsNow。
+3. 提取 Party／Actor／Status 完整資料。
+4. 寫入第一個 PositionFrame。
+5. 建立本 Pull 的初始 Cast／Status baseline。
+
+不得等到下一個 100 ms tick，否則可能遺失 Pull 開頭最多約 100 ms 的資料。
+
+目前程式已能在 StartRecording 後的同一次 RecordFrameworkSnapshot 呼叫 TryRecordFrame；重構後必須保留此行為。
+
+五、不得降至 10 Hz 的狀態
+
+以下仍逐 Framework.Update 處理：
+
+- InCombat。
+- Duty instance condition。
+- Territory／Map／Instance。
+- Automatic Pull lifecycle。
+- Pull start／end 判定。
+- 三秒脫戰 debounce。
+- Instance exit。
+
+以下仍由 UiBuilder.Draw 每個 UI frame 處理，不移入 100 ms Capture gate：
+
+- Replay combat auto-close／pause／load cancellation。
+- Debrief 顯示 gate。
+- Replay frame advance policy。
+
+以下仍為事件驅動：
+
+- Action Effect native callback。
+- DutyWiped。
+- DutyCompleted。
+- DutyRecommenced／DutyStarted。
+
+六、Probe 更新策略
+
+- 正在錄製：共用正式 Capture 的 10 Hz 完整 snapshot。
+- 未錄製、Probe 視窗開啟且位於 duty instance：最多 10 Hz 更新 Party／Actor／Status 顯示。
+- 未錄製且 Probe 視窗關閉：不掃描完整 Party／ObjectTable／StatusList。
+- Probe UI 接受最多約 100 ms 的顯示延遲。
+- Probe-only timer 不得建立 PositionFrame、推進 Capture timeline 或影響 Gap。
+
+七、Action 名稱快照的保留方式
+
+目前 Action name snapshot 是 PullRecord 的正式資料，第一階段必須保留：
+
+正式樣本觀察到施放中的 Action
+  → 若 ActionId 尚未保存且符合 retry 時機
+  → Lumina／Dalamud Action sheet
+  → Client LayoutWorld.ResolveRsvString
+  → entity-matched Enemy CastBar fallback
+  → ActiveCapture.ActionNames
+  → PullRecord.ActionNames
+  → Replay 優先使用錄製名稱
+
+限制：
+
+- Client RSV 與 CastBar fallback 必須在遊戲／UI 執行緒讀取。
+- 不得把 live UI pointer、Lumina row reference 或 CastBar reference 交給背景工作。
+- 背景 Finalization 只能使用已轉成 managed data 的 RecordedActionName。
+- 新 Action ID 的名稱解析可能配置字串與 RecordedActionName；第一階段接受此狀態，不為了追求 0 bytes 改寫名稱模型。
+- 將完整 Actor／Cast 提取降至 10 Hz 不會降低目前已保存的 Action name 觀察精度，因為現行 resolver 本來只在 TryRecordFrame 通過 100 ms gate 後執行。
+
+八、功能影響
+
+Position／Rotation Replay：
+
+- 無新增精度損失。
+- 正式資料原本就是約 10 Hz。
+- Replay 繼續使用位置線性插值與旋轉最短角度插值。
+
+HP／死亡狀態：
+
+- 無新增精度損失。
+- Actor state 與 Death transition 原本只在正式 Frame 保存。
+
+Cast／Status：
+
+- 維持目前約 10 Hz 的保存精度。
+- 不得因 Probe-only snapshot 產生重複事件。
+- Status identity、refresh 與 RemainingTime 邏輯保持不變。
+
+Waymark／Target Marker：
+
+- 維持目前約 100 ms 精度。
+- 仍在 Framework thread 讀取 native state。
+- 不得移至背景執行緒。
+
+Action Effect：
+
+- 不受第一階段影響。
+- 數量、target slot 順序、entry 順序與 GlobalSequence 必須保持。
+
+Pull lifecycle：
+
+- Start、三秒 debounce、Duty end、Instance exit 行為保持。
+- Instance exit 在下一個 Framework.Update 立即進入 Finalize。
+- 自動 Capture 仍不輸出 JSON。
+
+Replay／Debrief：
+
+- LastCompletedPull 發布契約保持。
+- 新 Pull 錄製時，上一個已完成 Pull 仍可 Replay。
+- Replay combat auto-close 不增加 100 ms 延遲。
+- 不新增 persistent Pull history 或 cross-session restore。
+
+九、目前 Finalization 邊界
+
+目前實際 Finalization 並非全部在背景：
+
+呼叫者執行緒，仍持有 CaptureService gate：
+  → ActiveCapture.Complete()
+  → ActionEffects.ToArray()
+  → ActionEffect actor ID 修補
+  → ActionNames 排序
+  → Actors／Frames／Events／Waymarks／Markers ToArray()
+
+背景 Task：
+  → Validate
+  → Debrief Analyze
+  → atomic publish LastCompletedPull
+  → 手動模式才輸出 JSON
+
+第一階段 10 Hz 改造不必同時搬移 Complete()。應先量測 Pull 結束 callback；只有 profiling 證明 materialization 造成實際尖峰時，才在第二部分處理。
+
+目前 backgroundTask 未完成時會阻擋下一個 ActiveCapture。第一階段保持此 lifecycle，不同時加入跨 Pull buffer ownership 或 Finalization 併行。
+
+十、第一階段主要修改範圍
+
+預期主要修改：
+
+- LiveDataProbe.cs
+- CaptureService.cs
+- ProbeWindow.cs 或 Plugin.cs 的 Probe visibility／refresh signal
+- CaptureServiceLifecycleTests.cs
+- LiveDataProbeTests.cs
+- 必要的 capture profiling／status 顯示
+
+第一階段原則上不修改：
+
+- RaidDebrief.Core 的公開 PullRecord model
+- PositionFrame／ActorStateSample／ObservedEvent／ActionEffectRecord 公開契約
+- ReplaySession public API
+- ActorStateResolver
+- DebriefAnalyzer
+- DeathEventCorrelator
+- Replay UI layout
+- JSON schema
+- Recorded fixtures
+- Action Effect hook threading
+
+十一、第一階段 profiling
+
+必須分開記錄，不能只看單一 MaximumCallbackMilliseconds：
+
+1. 非完整採樣 Framework callback。
+2. 正式 10 Hz 完整採樣 callback。
+3. Probe-only 完整刷新 callback。
+4. Pull start 強制樣本。
+5. Pull end／Complete callback。
+6. Action Effect callback，僅作為獨立基準，不在第一階段修改。
+
+建議觀察：
+
+- callback count。
+- p50／p95／p99／maximum。
+- 每類 callback allocated bytes。
+- AverageSampleIntervalMilliseconds。
+- Gap count。
+- rejected actor samples。
+- 實際 Framework FPS 區間。
+
+Profiling 本身不得在每 callback 建立字串、LINQ collection 或無上限樣本清單。使用固定容量統計或 Pull 結束後才彙整。
+
+十二、第一階段驗收條件
+
+取樣：
+
+1. 10 秒連續 Pull 約產生 100 個 PositionFrames；允許因起訖邊界出現合理的約 100／101 差異。
+2. Pull 開始同一個 Framework callback 產生第一個完整樣本。
+3. AverageSampleIntervalMilliseconds 維持約 100 ms。
+4. 低 FPS 不補寫假 Frame。
+5. Gap count 反映真實缺少的取樣間隔。
+6. 未錄製且 Probe 關閉時，不掃描完整 Party／Actor／Status。
+
+功能一致性：
+
+7. Action Effect 數量、targets、entries 與順序不變。
+8. Cast／Status／Death transition 不重複、不遺失相對於目前 10 Hz 契約。
+9. Waymark／Target Marker transition 維持目前精度。
+10. ActionNames 仍依既有優先序保存並供 Replay 使用。
+11. 三秒 debounce 完全相同。
+12. Instance exit 下一個 Framework.Update 即 Finalize。
+13. Replay combat auto-close／pause 不增加 100 ms 延遲。
+14. LastCompletedPull 在新 Pull 錄製期間仍可 Replay。
+
+回歸：
+
+15. x64 Debug solution build 成功。
+16. Core、Plugin、UI tests 全部通過。
+17. Synthetic fixtures 仍可載入。
+18. testdata/recorded/20260810_DMU.json 仍可完整 Replay。
+19. JSON round-trip 與 legacy JSON 相容。
+20. RaidDebrief.Core 仍不依賴 Dalamud。
+21. 實際遊戲 Pull 的 Frame、Event、Action Effect、ActionNames、Waymark、Target Marker 數量合理。
+22. 完成 x64 Debug hot reload 路徑與實機 Pull 驗證。
+
+效能：
+
+23. 非採樣 callback 不再執行 PartyList／ObjectTable／StatusList 完整掃描。
+24. 取樣與非取樣 callback 的 p50／p95／p99／maximum 可分開比較。
+25. 高 FPS 時 LiveDataProbe 的總 CPU 使用應下降；必須以實機資料確認，不預先宣稱固定比例。
+26. 不因排程改造持續增加 Gap。
+
+第一階段成本：中。
+第一階段風險：低至中。
+第一階段優先度：最高，且是目前唯一預設進行的效能重構。
+
+============================================================
+第二部分：Zero-Allocation 條件式規劃
+============================================================
+
+一、決策原則
+
+Zero-Allocation 不是第一階段必要條件，也不是目前承諾的產品功能。
+
+只有完成 10 Hz 完整提取、執行真實 Pull profiling 後，出現下列證據之一才啟動本部分：
+
+- 採樣 callback 的配置持續造成可觀察 GC 尖峰。
+- Framework callback p99／maximum 仍出現可重現且可歸因於 Capture 配置的尖峰。
+- Action Effect hook 被獨立 profiling 證明為瓶頸。
+- Pull end 的 Complete() materialization 造成可觀察停頓。
+- 長 Pull 的 List 擴容或物件數量造成不合理 Managed Heap／GC 壓力。
+
+若 10 Hz 改造後沒有遊戲可感知卡頓、Gap 異常或 GC 尖峰，則不進行 struct／slab／Channel 重構。
+
+二、Zero-Allocation 的正確定義
+
+不得用「所有 callback 一律 0 bytes」作為模糊承諾。應分開定義：
+
+A. 非採樣、無狀態變化的 Framework callback
+
+- 預熱後達成 0 bytes 是合理目標。
+- 只讀取輕量 Client／combat／instance state 並更新 primitive lifecycle state。
+
+B. 普通 10 Hz 採樣 callback
+
+- 若 internal buffers 已有容量、沒有新 Actor／Status identity／Action name，才可能以 0 bytes 為目標。
+- 是否值得達成，必須由第一階段 profiling 決定。
+
+C. 結構性變化 callback
+
+以下情況可能合理配置，不應混入普通穩態數字：
+
+- 新 Actor 第一次出現。
+- Party 成員改變或新名稱轉成 managed string。
+- Status buffer／segment 第一次成長。
+- 新 ObservedEvent。
+- 新 ActionId 的名稱解析與 RecordedActionName。
+- Pull 的 buffer segment 擴充。
+
+D. Action Effect callback
+
+目前每次事件會配置：
+
+- ActionEffectTargetRecord[]。
+- 每 target 的 ActionEffectEntryRecord[]。
+- ActionEffectTargetRecord objects。
+- ActionEffectEntryRecord objects。
+- ActionEffectRecord。
+
+因此只完成第一階段或 Position buffer 重構，不能宣稱 Action Effect callback 為 0 bytes。若要改善，必須另做 pooled slab／internal descriptor／direct append 或 Channel 方案，且必須先有 profiling 證據。
+
+E. Pull end callback
+
+目前 ActiveCapture.Complete() 會同步建立多個 arrays 並排序 ActionNames。這是一次性 Finalization 配置，不應與每 Frame 穩態配置混為一談。
+
+三、目前主要配置來源
+
+Framework 完整提取：
+
+- Actor／Party 名稱在 identity 改變時轉成 managed string。
+- Actor status array 容量不足時重新配置。
+- ActorProbeSnapshot 是 struct，但包含 string 與 PolledStatusObservation[] reference，因此不是 reference-free transport。
+
+ActiveCapture 在每個 Frame 或結構性狀態變化時：
+
+- new List<ActorStateSample>(actors.Length)。
+- 每個 Actor 建立一個 class-based ActorStateSample。
+- states.ToArray()。
+- 新 ActorRecord。
+- 新 ObservedEvent。
+- Dictionary／List 容量成長。
+
+Action name snapshot：
+
+- Action.Name.ToString()。
+- Client RSV／CastBar string。
+- RecordedActionName。
+- Dictionary entry。
+
+Action Effect hook：
+
+- 可變長 target／entry arrays 與 record objects。
+
+Pull Finalization：
+
+- Actors／Frames／Events／Waymarks／TargetMarkers／ActionEffects／ActionNames arrays。
+- ActionNames sorting list。
+- JSON 手動輸出時的完整 JSON string。
+
+四、若 profiling 證明必要，可依序採用的工作空間
+
+工作空間 A：Framework snapshot transport
+
+目標：降低普通 10 Hz sample 的物件數量。
+
+可新增 Plugin internal、reference-free sample：
+
+internal readonly struct CaptureActorSample
+{
+    public readonly int StableActorId;
+    public readonly float X;
+    public readonly float Y;
+    public readonly float Z;
+    public readonly float Rotation;
+    public readonly float HitboxRadius;
+    public readonly uint CurrentHp;
+    public readonly uint MaxHp;
+    public readonly byte Flags;
+}
+
+Flags 可保存：
+
+- Dead。
+- Targetable。
+- Omnidirectional。
+
+注意：
+
+- 以上 primitive payload bit-pack 後仍至少約 33 bytes，不是 32 bytes。
+- 目前 ActorStateSample 是 managed class，實際成本還包含 object header、alignment 與 reference array，不能用 33／35／40 bytes 當作目前 class 的真實 heap 大小。
+- 不預設使用 StructLayout Pack=1；先保留自然對齊並量測。
+- 公開 ActorStateSample 暫時保持不變，只改 Capture internal transport。
+
+工作空間 B：Frame header、flat samples 與 Status slab
+
+可改為：
+
+FrameHeader
+  ├─ TimestampMilliseconds
+  ├─ ActorSampleOffset
+  └─ ActorSampleCount
+
+ActorSample segments
+  └─ reference-free CaptureActorSample
+
+StatusSample segments
+  └─ owned PolledStatusObservation range
+
+要求：
+
+- 不將 LiveDataProbe 會重用的 Statuses array reference 交給背景 consumer。
+- 每一筆 snapshot 必須擁有不會被下一個 Framework update 覆寫的 range。
+- Status identity／refresh 邏輯保持。
+
+工作空間 C：Segmented buffers
+
+只在 List 擴容與 GC 已被量測為問題時採用。
+
+優點：
+
+- 避免大型連續陣列倍增與全歷史複製。
+- 容量逐段增加。
+- 容易移交 ownership。
+- 不覆寫 Pull 開頭。
+
+不得使用：
+
+- 固定 50,000 flat Actor samples。
+- 會覆寫最舊資料的 Circular Buffer。
+- 無上限 buffer 成長而沒有狀態／失敗可見性。
+
+真實 20260810_DMU fixture：
+
+- 588.302 秒。
+- 5,884 Frames。
+- 330,916 Actor samples。
+- 平均 56.24 Actors／Frame。
+- 約 562.49 Actor samples／秒。
+
+50,000 flat samples 只能涵蓋約 88.9 秒，因此不符合完整 Pull Replay。
+
+工作空間 D：背景 materialization
+
+只有 Pull end profiling 證明 Complete() 是問題時採用：
+
+Capture internal owned segments
+  → 停止該 Pull 寫入
+  → 背景 materialize 現有公開 PullRecord arrays
+  → Validate
+  → Debrief Analyze
+  → atomic publish LastCompletedPull
+  → 釋放／回收 internal segments
+
+要求：
+
+- 背景工作只讀 managed owned data。
+- 不讀 ObjectTable、StatusList、Waymark native state、Target Marker native state、Client RSV 或 CastBar UI。
+- materialization 完成前不得清除或重用 segments。
+- Replay 不得引用會被下一 Pull 重用的 capture buffer。
+- PullRecord 是 ownership-isolated finalized record，發布後依契約視為 immutable；其公開 arrays 並非型別系統保證的 immutable collection。
+
+目前 background finalization 未完成時會阻擋下一 Pull。是否允許上一 Pull materialization 與下一 ActivePull 併行，是獨立的 lifecycle／ownership 變更，不隨背景 materialization 自動加入。
+
+工作空間 E：Action Effect 最佳化
+
+只在 hook profiling 證明必要時採用。
+
+native pointers 只在 callback 期間有效，所以 callback 內仍必須：
+
+驗證 pointers
+  → 解碼 header
+  → 同步複製 targets／entries 到 owned memory
+  → 保存或 enqueue owned descriptor
+  → 呼叫 Original
+
+不得把 native pointer 放進背景 queue。
+
+可選方案：
+
+1. 預先配置／pool 的 target 與 entry slabs，直接同步寫入 ActiveCapture。
+2. slab + 小型 descriptor + bounded Channel。
+
+Channel 不是必要條件。只有需要跨 producer 解耦且量測顯示值得時才加入。
+
+若加入 Channel：
+
+- Bounded。
+- SingleReader=true。
+- AllowSynchronousContinuations=false。
+- producer 使用 TryWrite，不等待 consumer。
+- item 只保存小型 descriptor，不複製大型 inline fixed array。
+- 每筆帶 Capture epoch、timestamp、producer sequence。
+- Finalize 使用 barrier 並 drain 到該 barrier 後才發布。
+- overflow、drop、queue depth 必須可見。
+- Action Effect drop 必須清除 ActionEffectCapture completeness；不得靜默標示完整。
+
+若不加入 Channel，queue depth／overflow／drop 不列入驗收條件。
+
+工作空間 F：Stream-based JSON
+
+JSON 是 Developer/Test 邊界，與 Runtime 10 Hz Capture 分開評估。
+
+目前：
+
+File.ReadAllText
+  → JsonSerializer.Deserialize(string)
+
+JsonSerializer.Serialize
+  → 完整 JSON string
+  → temporary file
+  → atomic move
+
+若需要降低大型 fixture 峰值記憶體，可獨立改為：
+
+File.OpenRead
+  → JsonSerializer.Deserialize(Stream)
+
+JsonSerializer.Serialize(Stream)
+  → temporary file
+  → atomic move
+
+這不影響 Runtime LastCompletedPull，也不應與 Framework／Action Effect threading 同次修改。
+
+五、Zero-Allocation 不變量
+
+不論採用哪些工作空間，都必須保持：
+
+1. Capture 與 Replay／Analysis 隔離。
+2. RaidDebrief.Core 不依賴 Dalamud。
+3. Replay 只消耗 finalized PullRecord，不讀 live game objects。
+4. Game-thread native data 在 callback 內同步轉成 owned data。
+5. 不修改公開 Core／JSON 契約，除非另有明確需求與相容方案。
+6. 不覆寫 Pull 開頭。
+7. 不靜默 Drop。
+8. 不把 reused Status array 或 native pointer 交給背景工作。
+9. 不為達到字面上的 0 bytes 而犧牲完整 Pull、事件順序、Action name、Waymark、Target Marker 或 Action Effect completeness。
+10. 不在沒有 profiling 證據時加入 Channel 或複雜 buffer ownership。
+
+六、若啟動第二部分的驗收方式
+
+配置必須分類報告：
+
+- 非採樣／無變化 Framework callback。
+- 普通 10 Hz sample。
+- 新 Actor／Status／Action name sample。
+- ObservedEvent transition sample。
+- Action Effect callback。
+- segment growth。
+- Pull end Complete／materialization。
+- Manual JSON export／Developer fixture load。
+
+只可對明確類別宣稱 0 bytes。例如：
+
+- 「預熱後、無狀態變化的非採樣 callback：0 bytes」是可驗證主張。
+- 「所有 Framework callback：0 bytes」不是合理主張。
+- 「所有 Action Effect callback：0 bytes」只有完成並驗證 pooled owned storage 後才可主張。
+
+必須量測：
+
+- p50／p95／p99／maximum。
+- allocated bytes per callback category。
+- Gen 0／Gen 1 frequency。
+- Gap count。
+- buffer segment growth count。
+- 若有 Channel：queue depth／overflow／drop。
+- Pull end materialization duration。
+
+功能回歸仍必須包括：
+
+- x64 Debug solution build。
+- Core／Plugin／UI tests。
+- Synthetic／recorded fixture Replay。
+- JSON round-trip／legacy compatibility。
+- Action Effect 數量與順序。
+- ActionNames 保存與 Replay 優先序。
+- Status transition。
+- Waymark／Target Marker。
+- 三秒 debounce／instance exit。
+- LastCompletedPull ownership 與 Replay 可用性。
+- Dalamud x64 Debug hot reload 與真實 Pull。
+
+第二部分成本：依啟動工作空間而定，中至高。
+第二部分風險：中至高。
+第二部分優先度：條件式；第一部分 profiling 未證明必要時不進行。
+
+============================================================
+最終建議
+============================================================
+
+目前實作順序：
+
+Phase 0.1
+  → StatusList 與 Length 區域快取
+  → Actor name cache 使用穩定 ObjectTable slot identity
+  → Event／Action Effect diagnostics 改為 lazy cached
+
+Phase 0.5
+  → 建立 deterministic sampling scheduler
+  → 補 first sample／100 ms cadence／low-FPS／Gap／scan gate 測試
+
+Phase 1
+  → 每幀輕量 lifecycle
+  → CaptureService 單一正式取樣 owner
+  → 10 Hz Party／Actor／Status／Waymark／Target Marker 完整提取
+  → Pull start 同 callback 強制樣本
+  → Probe-only 10 Hz 顯示刷新
+  → Action Effect 事件驅動保持不變
+  → ActionNames game-thread snapshot 保持不變
+  → Replay／Core／JSON 契約保持相容
+
+驗證
+  → 分類 callback timing／allocation
+  → 完整自動化回歸
+  → Synthetic／Recorded Replay
+  → x64 Debug hot reload
+  → 真實 Pull Capture
+
+Phase 0.2（最後且條件式）
+  → 只有 Phase 0.1／0.5／1 完成後仍無法通過 allocation／GC／callback 驗收，
+    且 profiling 證明剩餘問題來自 Dalamud Status wrapper 時才實作。
+  → 若啟動，只將 wrapper 讀取改為 native StatusManager；
+    保持 NumValidStatuses 上界與前 N slots，不改掃完整 60 slots，
+    SourceObjectId 必須使用 SourceObject.ObjectId。
+
+若前述驗證已通過：停止，不進行 Phase 0.2、internal structs、segmented buffers、背景 materialization、Action Effect Channel 或 Stream-based JSON。

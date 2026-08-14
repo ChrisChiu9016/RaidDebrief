@@ -15,4 +15,6 @@ internal sealed class PluginConfiguration : IPluginConfiguration
     public bool ShowPostWipeDebrief { get; set; } = true;
 
     public bool CloseReplayOnCombatStart { get; set; } = true;
+
+    public bool ShowHotEffects { get; set; }
 }

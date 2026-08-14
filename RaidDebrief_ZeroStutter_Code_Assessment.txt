@@ -1,0 +1,627 @@
+Raid Debrief：Zero-Stutter 方案與現有實作對照評估
+原始整理：2026-08-12；狀態更新：2026-08-14
+原評估基準：git cfe1a88 加上當時未提交的工作目錄變更
+原評估對象：RaidDebrief_ZeroStutter_Implementation_Impact.txt
+            RaidDebrief_Performance_Assessment.txt
+目前定位：保留修改前 code audit 與推導；下方舊行號不得當作目前原始碼定位
+
+2026-08-14 實作狀態：
+
+- 已完成 StatusList 單次區域快取、ObjectTable slot＋GameObjectId 名稱快取、
+  Event／Action Effect lazy identity diagnostics。
+- 已完成 CaptureSamplingScheduler、BeginFrameworkUpdate／SubmitFrameworkSample
+  兩段式 API、FrameworkScanCoordinator、immediate first sample、gap accounting、
+  in-duty probe-only 10 Hz refresh，以及 closed Probe＋idle Capture no-scan。
+- 已補 deterministic cadence、cancel、non-monotonic、overlap、shared scan、
+  failed-scan retry 與 warmed closed-path 0-allocation 測試。
+- 目前自動化基準為 Core 99／Plugin 169／UI 4，共 272／272；三份 recorded
+  fixtures 均完成完整 Replay 與 20,000 deterministic seeks。
+- 最新 x64 DLL 已依 configured path post-build hot reload；current-build Pull
+  `66043fb5-d46b-48ba-9048-a25f53190b2a` 已在約 13.9 分鐘後以 8,341 frames
+  完成 `DutyWiped` finalization／validation，Runtime Replay 隨後以相同
+  CaptureId、frame／event 數直接載入。輸出檢查與修改前後 callback
+  allocation／GC／frame-time profiling 仍未建立，因此本文原先指出的
+  「stutter 候選」尚不能改寫成已證實原因或「zero stutter」完成宣告。
+- 本文其餘各節是實作前評估紀錄；目前權威契約見 docs/ARCHITECTURE.md，
+  驗證狀態見 docs/TEST_RECORDS.md。
+
+
+零、驗證環境與基準
+
+x64 Debug solution build：成功。
+Core tests：90／90 通過。
+Plugin tests：116／116 通過。
+UI tests：4／4 通過。
+合計：210／210 通過。
+
+效能文件第十一節宣稱的 210／210 經實跑確認正確。
+
+Dalamud 版本基準：Dalamud.NET.Sdk 15.0.0，本機 Hooks 15.0.3.1-19-g2303f550a。
+本評估中所有 Dalamud 內部行為均以對應版本之公開原始碼查證，非推測。
+
+
+一、總體結論
+
+1. 文件方向正確，數據紮實。所有可量化主張經復驗全部吻合，沒有捏造數字。
+2. 文件的「不建議實作」清單全部正確且具見地。
+3. 文件有兩處與現況不符：第三節第三項已經實作完成；第三節第六項的測試影響評估方向相反。
+4. 文件存在一個關鍵盲點：Dalamud BattleChara.StatusList 每次屬性存取都會配置物件，而現有程式碼將其寫在迴圈條件中，且未錄製時照樣全速運轉。這是原始碼已確認的高頻配置來源，也是目前最值得優先消除的 stutter 候選；但因果關係尚未經實機 frame-time 與 GC profiling 證明，本文所有 MiB／秒數字均為模型推算，非量測值。文件完全未提及此路徑。
+5. 因為第四點，文件將優先序第二的預算投入在只有該盲點十分之一大小的目標上。第二階段建議刪除。
+6. 建議插入成本極低的 Phase 0，並在第一階段之前補上目前完全缺失的驗收測試。
+
+
+二、文件正確的部分（逐項驗證）
+
+以下主張全部經程式碼或實測資料確認為真：
+
+1. 10 Hz 寫入閘門位於 ActiveCapture.TryRecordFrame。
+   證據：CaptureService.cs:913-927。使用 Stopwatch 對齊絕對 100 ms 格線
+   （nextSampleAtMilliseconds = ((t / 100) + 1) * 100），而非逐幀累加 delta time。
+   此即效能文件第九節第二項要求的單調時鐘，已滿足。
+
+2. Party、ObjectTable、StatusList 提取在每個 Framework.Update 執行。
+   證據：LiveDataProbe.cs:110-112，CaptureClientState／CaptureParty／CaptureActors
+   三者無條件依序執行，之後才於下游 CaptureService 判斷是否寫入。
+
+3. 實機 fixture 數據全部精確吻合。
+   實測 testdata/recorded/20260810_DMU.json：
+
+   項目                  文件主張      實測值        結果
+   Pull 時長             588.3 s       588.4 s       吻合
+   Position Frames       5,884         5,884         吻合
+   Actor State Samples   330,916       330,916       吻合
+   平均 Actor／Frame     56.24         56.24         吻合
+   記錄過的 Actor        173           173           吻合
+   Events                7,649         7,649         吻合
+   Action Effects        4,185         4,185         吻合
+   JSON 檔案大小         106.9 MiB     106.86 MiB    吻合
+
+   Frame 間隔實測：最小 90 ms，最大 109 ms，平均 100.0 ms。
+   證實目前採樣排程穩定且無漂移。
+
+4. CaptureJson 為全字串式。
+   證據：CaptureJson.cs:126 Load 使用 File.ReadAllText；
+   CaptureJson.cs:18 Serialize 回傳完整字串；:111 WriteAtomic 使用 File.WriteAllText。
+   全檔搜尋 Stream／FileStream／Utf8JsonWriter／SerializeAsync／DeserializeAsync 均無匹配。
+   第四階段的前提描述完全正確。
+
+5. 公開資料模型為 class。
+   證據：PullRecord.cs:34 PullRecord、:110 PositionFrame、:117 ActorStateSample
+   皆為 sealed record（參考型別）。ActorStateSample 無參考欄位，
+   酬載 35 bytes，對齊後約 40 bytes，加 16 bytes 物件標頭約 56 bytes／物件。
+   此即效能文件量到的 PullRecord 額外 22.8 MiB 的主要來源。
+
+6. Status array 會被重用，不可直接放入 Channel。
+   證據：LiveDataProbe.cs:301-304 依 destinationIndex 重用 PolledStatusObservation[]。
+   目前安全，因為 CaptureService.cs:1037 傳入的 ReadOnlyMemory 於
+   :1046 eventDetector.ObserveFrame 同步消費完畢，
+   且 PolledEventDetector 會複製進內部 List（PolledEventDetector.cs:346-364），
+   不保留輸入別名。文件第四節第四項針對未來 Channel 的警告正確。
+
+7. 第四節第二項的 35 bytes 算術正確，且「Pack=1 到不了 32 bytes」的結論正確。
+
+8. 不使用 Circular Buffer 的論證正確。Raid Debrief 的產品目標是完整 Pull Replay。
+
+9. 拒絕在未量測前保證所有 callback 低於 0.1 ms，正確。
+
+10. 保留現有公開 Core 模型、以背景 materialization 銜接的策略正確，
+    可避免同時重寫 Replay、Analyzer、Validator、Offline host、UI 與 recorded fixtures。
+
+11. RaidDebrief.Core 不依賴 Dalamud。
+    證據：RaidDebrief.Core.csproj:1-7 僅 SDK／net10.0，全樹搜尋無 Dalamud。
+
+
+三、出入 A：第三節第三項「Pull 開始立即取樣」已經實作完成
+
+文件將此列為待實作項目，並強調「不能等待下一個固定 100 ms tick」。
+實際上現有程式碼已經滿足此需求。
+
+執行路徑：
+  CaptureService.cs:327-330  lifecycleCommand == StartRecording → BeginCapture
+  CaptureService.cs:441      new ActiveCapture(...)
+                             startedTimestamp = Stopwatch.GetTimestamp()（:850）
+                             nextSampleAtMilliseconds 預設 0（:854）
+  CaptureService.cs:333      activeCapture 非 null，不 return
+  CaptureService.cs:339      同一 callback 內呼叫 TryRecordFrame
+  CaptureService.cs:913-914  timestampMilliseconds 約為 0，
+                             判斷式 0 < 0 為 false，直接取樣
+
+實測佐證：20260810_DMU.json 的第一個 frame 其 timestampMilliseconds 為 1。
+
+結論：此項工作量為零。文件的成本估算應相應下修。
+
+
+四、出入 B：測試影響評估方向相反
+
+文件第三節第六項將 LiveDataProbeTests.cs 與 CaptureServiceLifecycleTests.cs
+列為主要修改對象。實際情況相反。
+
+1. LiveDataProbeTests.cs:8-36 僅測試三個 static helper
+   （IsRecordablePlayerEntity、duty flag 判定、BNPC omnidirectional），
+   完全不涉及採樣排程。此檔案不需要修改。
+
+2. CaptureServiceLifecycleTests.cs 沒有任何 cadence、gap count 或首樣本斷言。
+   相關測試僅斷言生命週期結果：
+     :15-53    DutyEndFinalizesOnceAndWaitsForCombatClear
+     :265-329  AutomaticCaptureRequiresDutyInstanceAndFinalizesOnExit
+     :329-385  AutomaticCombatEndDebouncesAndReentryCancelsPendingEnd
+     :393-450  PlayerDeathAndBossDespawnRespawnStayInOnePull（以 110 ms 間隔送快照）
+
+3. 沒有任何測試斷言「完整 actor 提取發生在每個 Framework.Update」。
+   因此 10 Hz 改動不會撞到既有測試。
+
+4. 真正的問題是相反方向：文件第九節驗收條件第 1 至 5 項
+   （10 秒約 100 frames、首樣本同 callback、平均間隔約 100 ms、
+   低 FPS 不補假 frame、Gap count 正確）目前一條測試都沒有。
+
+   間接相關但不覆蓋這些條件的既有測試：
+     CaptureJsonTests.cs:8-23        斷言 3 frames 與平均間隔 100 ms
+     RecordedFixtureTests.cs:19-68   斷言 fixture 2,233 frames 與時間戳嚴格遞增
+     ActorStateResolverTests.cs:38-54 斷言狀態變化只在採樣邊界
+
+結論：此重構目前沒有安全網，卻被文件評為「風險 低至中」。
+應先補測試，再動採樣排程。
+
+
+五、出入 C：文件的關鍵盲點 —— Dalamud StatusList 配置風暴
+
+這是本次評估最重要的發現，兩份文件均未提及。
+
+1. 問題程式碼
+
+LiveDataProbe.cs:301-309：
+
+    if (statuses is null || statuses.Length < battleChara.StatusList.Length)
+    {
+        statuses = new PolledStatusObservation[battleChara.StatusList.Length];
+        this.actorStatuses[destinationIndex] = statuses;
+    }
+
+    for (var statusIndex = 0; statusIndex < battleChara.StatusList.Length; statusIndex++)
+    {
+        var status = battleChara.StatusList[statusIndex];
+        ...
+    }
+
+battleChara.StatusList 出現在三個位置，其中一個是迴圈條件、一個是迴圈本體。
+
+2. Dalamud 側的實際行為（已查證對應版本原始碼）
+
+Dalamud/Game/ClientState/Objects/Types/BattleChara.cs：
+
+    public StatusList StatusList => new(this.Struct->GetStatusManager());
+
+每次屬性存取都 new 一個 StatusList 物件。
+
+Dalamud/Game/ClientState/Statuses/StatusList.cs：
+
+    public IStatus? this[int index] { get { ... return CreateStatusReference(addr); } }
+    public static IStatus? CreateStatusReference(nint address) { ... return new Status(...); }
+
+每次索引存取再 new 一個 Status 物件。
+
+對照組：ObjectTable[i] 不配置。
+Dalamud/Game/ClientState/Objects/ObjectTable.cs 的 CachedEntry.Update()
+重用預先配置好的 wrapper 實例，僅更新 Address 欄位。
+因此問題精確地只存在於 StatusList 這條路徑，與 ObjectTable 掃描本身無關。
+
+3. 配置量計算
+
+設 S = 該 actor 的 NumValidStatuses，每個 actor 每個 Framework.Update：
+
+  第 301 行條件            1 個 StatusList
+  第 307 行迴圈條件        S + 1 個 StatusList（每次迭代都重新求值）
+  第 309 行索引存取        S 個 StatusList ＋ S 個 Status
+  合計                     (2S + 2) 個 StatusList ＋ S 個 Status
+
+每次索引存取產生的兩個配置分別為：StatusList 為 sealed class（直接配置）；
+Status 在現行 master 為 internal readonly struct，但以 IStatus? 介面回傳時會裝箱。
+無論 class 或裝箱 struct，單一物件皆約 24 bytes
+（16 bytes 標頭 ＋ 8 bytes 指標欄位），故以下數量與位元組推算不受影響。
+
+  S=5   每 actor 17 物件   408 bytes
+  S=10  每 actor 32 物件   768 bytes
+  S=20  每 actor 62 物件  1,488 bytes
+  S=30  每 actor 92 物件  2,208 bytes
+
+以 fixture 實測的 56.24 actors／frame 推算：
+
+  S=10、100 FPS   約 180,000 物件／秒    約 4.12 MiB／秒
+  S=10、144 FPS   約 259,000 物件／秒    約 5.93 MiB／秒
+  S=20、144 FPS   約 502,000 物件／秒    約 11.49 MiB／秒
+
+4. 為何這是最值得優先處理的 stutter 候選
+
+（措辭限定：以下為機制推論，非實機因果證明。見第十二節第一項。）
+
+這些是短命的 Gen 0 物件。Gen 0 回收雖快，但發生在遊戲主執行緒上，
+為同步暫停。上述配置速率會使 Gen 0 回收頻繁觸發，
+形成不規則的 frame time 尖峰，症狀即為使用者感受到的 stutter。
+
+5. 更嚴重的是：閒置時照樣運轉
+
+LiveDataProbe.cs:110-112 無條件執行。
+全域搜尋確認 probe.Actors 與 probe.PartyMembers 的唯一消費者是
+ProbeWindow.cs:264-286、:342（開發用視窗）。
+
+因此在城裡發呆、未錄製、Probe 視窗關閉時，
+上述每秒數 MiB 的垃圾仍然全速產生，且完全沒有任何消費者。
+
+
+六、出入 D：兩個次要浪費
+
+1. UI 顯示字串急切建構
+
+CaptureService.cs:352-354 每個取樣 frame 呼叫 FormatEvent，
+該方法（:805-820）內含最多 5 次字串插值。
+CaptureService.cs:426 每個 Action Effect 呼叫 FormatActionEffect（:821-830）。
+
+兩者的唯一用途都是 Probe 視窗顯示。視窗關閉時為純浪費。
+
+2. Actor 名稱快取的 slot 別名缺陷
+
+LiveDataProbe.cs:261-264：
+
+    var previous = this.actors[destinationIndex];
+    var name = previous.GameObjectId == gameObject.GameObjectId
+        ? previous.Name
+        : gameObject.Name.TextValue;
+
+快取鍵是 destinationIndex，也就是壓縮後的連續索引（nextActorCount），
+而非 ObjectTable 的原始 objectIndex。
+
+當 ObjectTable 中任一 actor 消失，其後所有 actor 的壓縮索引整體位移一格，
+導致後續所有 slot 快取失效，全部走 gameObject.Name.TextValue，
+觸發 SeString.Parse 與字串配置。
+
+小怪頻繁生滅的戰鬥中，此路徑會週期性爆發配置。
+
+
+七、套用文件建議能否達到預期效果
+
+第一階段（10 Hz 完整提取）：能，且效果優於文件宣稱。
+
+  文件只說「Framework CPU 預期下降」。實際上它同時把第五節的
+  StatusList 垃圾砍 10 至 16 倍（4.12 MiB／秒 降至 0.41 MiB／秒）。
+  這是唯一應該立刻執行的階段。
+
+  但文件第三節第二項的 coordinator 不是選配，是必要。原因文件未言明：
+
+  目前 BeginCapture 發生在 RecordFrameworkSnapshot 內部（CaptureService.cs:329），
+  也就是在資料提取「之後」。若直接把「本幀是否提取」的閘門前移到提取之前，
+  則戰鬥開始那一幀尚未進入 recording 狀態，閘門會判定不需提取，
+  恰好會漏掉文件自己在第三節第三項要求的首樣本。
+
+  必須改成兩段式 API：
+
+      BeginFrame(inCombat, territory, map, instance, isInDutyInstance)
+          → CaptureDecision { None | SampleNow }
+      （只有 SampleNow 才掃描 Party／ObjectTable／StatusList）
+      SubmitSample(actors, partyMembers)
+
+  另一個陷阱：未錄製但 Probe 視窗開啟時的 10 Hz 時鐘不能借用
+  ActiveCapture.startedTimestamp，因為當下 ActiveCapture 不存在。
+  排程 owner 必須位於 CaptureService 層級並獨立於 ActiveCapture 生命週期。
+
+第二階段（Capture 內部 struct 與分段 buffer）：不能達到宣稱效果，建議刪除。
+
+  在 10 Hz 前提下實算：
+
+    第二階段消除的物件
+      1 個 List ＋ 56.24 個 ActorStateSample ＋ 1 個 ToArray 陣列 ＋ 1 個 PositionFrame
+      = 592 物件／秒，0.039 MiB／秒
+
+    第一階段後仍殘留的 StatusList wrapper（第二階段完全沒碰）
+      = 17,997 物件／秒，0.412 MiB／秒
+
+  第二階段成本「中高」、風險「中」，
+  換來的獎品比它視而不見的那個小 10.6 倍。
+
+  這是整份計畫最大的判斷錯誤：優先序第二的項目瞄準了錯誤的目標。
+
+第三階段（Action Effect Channel）：建議直接刪除，不需保留為待量測項目。
+
+  對 20260810_DMU.json 實測 Action Effect 密度：
+
+    總數                      4,185
+    平均                      7.11 次／秒
+    單一 1 秒桶最大值         18 次
+    單一 100 ms 桶最大值      9 次
+    targets 總數              5,930（單次最大 16）
+    entries 總數              11,206
+    hook 平均配置             約 46 物件／秒
+
+  對照 StatusList 路徑的 180,000 至 500,000 物件／秒，
+  兩者相差約四千至一萬倍。Action Effect hook 在數量級上
+  根本不是 stutter 來源，文件所要求的 profiling 只會確認這一點。
+
+  因此：
+  1. 不要重排 Original() 呼叫順序。native pointer 在 Original() 之後的
+     有效性無法從原始碼證明，需實機驗證；而為一條 7 Hz 的路徑
+     承擔這個風險不划算。此項撤回。
+  2. 不要建置 Channel 管線（成本 高、風險 高）。
+  3. 唯一值得做的是零風險的那項：移除 CaptureService.cs:426
+     位於 hook 持鎖路徑上的 FormatActionEffect 字串建構（純 UI 顯示）。
+
+第四階段（Stream-based JSON）：能，文件描述正確，且與其他階段正交，可平行進行。
+
+0.1 ms 目標：文件拒絕預先保證的立場正確，維持不變。
+
+
+八、更佳方案
+
+Phase 0（文件沒有，成本最低、收益最大）
+
+  0a. 未錄製且 Probe 視窗關閉時跳過 CaptureParty 與 CaptureActors。
+      消除 100% 的閒置成本。唯一消費者是開發用視窗（ProbeWindow.cs:264-286、:342）。
+
+      重要更正：初版稱此為「約 5 行」的獨立修改，錯誤。
+      不能用 if (!IsRecording && !probeOpen) return; 短路，理由與第七節
+      第一階段所述的排序陷阱完全相同——戰鬥開始那一幀 IsRecording 仍為 false，
+      短路會導致自動 Pull 永不啟動；即使只跳過掃描而仍呼叫
+      RecordFrameworkSnapshot，該幀也會以空的 actors span 寫出首個 Frame。
+      此項必須與 Phase 1 的兩段式 coordinator 一起設計，不可先行。
+
+  0b. 改用 FFXIVClientStructs 指標讀取 Status，約 20 行。
+      本專案已是此風格：WaymarkReader.cs:33-50 直接使用
+      MarkingController.Instance()->FieldMarkers，
+      TargetMarkerReader 亦同，均為 unsafe 直讀且零配置。
+
+      StatusManager 是 BattleChara 的內嵌欄位（FieldOffset 0x23B0），
+      不是堆積指標，取址為單純位移運算，零成本。
+
+      等價性已由原始碼逐欄位證明（非推測，不需實機 A／B）：
+
+        Dalamud wrapper                     原生等價寫法
+        status.StatusId       ptr->StatusId          （ushort 擴寬為 uint）
+        status.Param          ptr->Param
+        status.RemainingTime  ptr->RemainingTime
+        status.SourceId       ptr->SourceObject.ObjectId
+
+      注意最後一項：Dalamud 的 SourceId 取的是 GameObjectId.ObjectId
+      （低 32 位元），不是整個 64 位元值。
+      原生改寫若直接轉型整個 ulong 會產生不同結果，此為唯一實質陷阱。
+
+      迴圈上界維持 NumValidStatuses 不變，因此改寫在建構上即為行為保持：
+      同一個指標、同一個上界、同一組欄位。
+
+      配置歸零。不動任何資料契約，不動任何既有測試。
+      單獨這一項消除的垃圾就超過整個第二階段。
+
+      保守替代方案（可作為第一個 commit）：
+      僅把 battleChara.StatusList 提取為區域變數並快取 Length，
+      約 2.9 倍改善。但這是中途站，不是替代品。
+
+      獨立議題，不要與本項混為一談：
+      StatusList.Length 回傳 NumValidStatuses，而底層為 FixedSizeArray60。
+      若遊戲不保證有效 status 緊密排列於前 N 槽，則「現行 wrapper 程式碼
+      本來就會漏讀」。這是「迴圈上界」的既有性質，與「存取機制」無關。
+      維持相同上界的原生改寫既不修復也不惡化它。
+      是否改掃描完整 60 槽屬另一次變更，需獨立實機驗證。
+
+  0c. FormatEvent 與 FormatActionEffect 改為 lazy ＋ cache，不是單純 lazy。
+      單純改成 Draw 時格式化會從每秒 10 次變成每秒 60 至 144 次，反而更差。
+      正確做法：CaptureService 保存結構化的最後事件，
+      僅在事件 identity 改變時更新快取字串；Probe 關閉時完全不建立字串。
+
+  0d. Actor 名稱快取改用「以原始 objectIndex 為索引的固定陣列」
+      （cachedActorObjectIds[objectIndex] ＋ cachedActorNames[objectIndex]），
+      同 slot 的 GameObjectId 改變時才重讀名稱。
+      不使用 Dictionary<ulong, string>：會跨區域跨 Pull 無界成長，
+      且 GameObjectId 重用時可能取到錯誤名稱。ObjectTable slot 數固定，
+      固定陣列無此問題。初版建議 Dictionary 為較差選擇，已更正。
+
+Phase 0.5
+
+  補上文件第九節驗收條件第 1 至 5 項的測試（目前完全空白），
+  讓後續採樣排程重構有安全網。
+
+修正後的建議順序
+
+  Phase 0    掃描閘門 ＋ 原生 Status ＋ 延遲字串 ＋ name 快取
+             成本 低    風險 低    收益 消除約 95% 熱路徑配置
+  Phase 0.5  補驗收測試
+             成本 低    風險 —     收益 後續重構安全網
+  Phase 1    10 Hz coordinator（含兩段式 API）
+             成本 中    風險 中    收益 再降 10 至 16 倍掃描頻率
+  量測       p50／p95／p99／maximum ＋ 每 callback allocated bytes
+                                     ＋ queue depth ／ overflow ／ drop
+  Phase 4    Stream-based JSON（獨立、可與上述平行）
+             成本 低    風險 低    收益 dev 峰值 1.06 GB 降至 73.5 MB
+  Phase 2    大機率不需要，若確定要做記憶體最佳化請見第九節
+  Phase 3    刪除。實測 7.11 次／秒、峰值 18 次／秒，
+             比 StatusList 路徑小四千至一萬倍，不是瓶頸。
+             僅保留其中零風險的 FormatActionEffect 移除（併入 Phase 0c）。
+
+Phase 0 加 Phase 1 之後，「非採樣」Framework callback 可望達成預熱後零配置。
+但整條 Capture 路徑並非零配置——10 Hz 正式採樣 callback 仍會配置
+1 個 List、約 56 個 ActorStateSample、1 個 array 與 1 個 PositionFrame
+（約 592 物件／秒），另有新 Actor、Event、Action name 與
+Action Effect callback 的額外配置。
+初版「熱路徑基本上即達成穩態零配置」與本文自己的數據矛盾，已更正。
+零配置目標必須依 callback 類型分別陳述。
+
+
+九、若確定要做記憶體最佳化：走 SoA，不要走 Pack=1
+
+文件第四節第二項糾結如何壓到 32 bytes，方向不對。
+
+實測 20260810_DMU.json 的欄位變異：
+
+  hitboxRadius   172／173 個 actor 全程恆定
+                 唯一例外為會變大的王（2.6999998 至 22.5）
+  maxHp          167／173 個 actor 恆定
+  y              165／173 個 actor 恆定
+
+因此「把欄位搬到 ActorRecord」不安全，會弄壞那隻會變大的王。
+但這些欄位在欄式（Structure-of-Arrays）佈局下幾乎免費。
+
+保留記憶體實算（330,916 samples、5,884 frames）：
+
+  現況 record class（含每 sample 16 bytes 標頭）   20.38 MiB
+  struct[] AoS（自然對齊 40 bytes）                12.94 MiB
+  SoA 欄式（35 bytes，無每筆標頭）                 11.14 MiB
+
+  SoA 相對現況節省約 9.2 MiB，約 45%。
+  效能文件量到的 PullRecord 總額 22.8 MiB 中，samples 佔 20.4 MiB。
+
+真正的省法是消掉每筆 sample 的 16 bytes 物件標頭，而非 bit-packing。
+
+但必須強調：這只影響「保留記憶體」，對 stutter 無感。
+因此應將其視為獨立的「長 Pull 記憶體佔用」議題，
+不要與 zero-stutter 目標綁在同一次變更中。
+
+
+十、結論摘要
+
+1. 文件品質高。所有數據經復驗吻合，
+   「不建議實作」清單（不禁 class、不用 Pack=1、不用 50,000 固定容量、
+   不用 Circular Buffer、不用 Unbounded Channel、不預先保證 0.1 ms）
+   全部正確且具見地。
+
+2. 兩處出入：
+   第三節第三項「Pull 開始立即取樣」已實作完成，工作量為零。
+   第三節第六項測試影響方向相反，真正的問題是驗收條件第 1 至 5 項
+   完全沒有測試覆蓋。
+
+3. 一個關鍵盲點：
+   Dalamud BattleChara.StatusList 每次屬性存取都配置物件，
+   而現有程式碼將其寫在迴圈條件中，
+   造成每秒 4 至 12 MiB 的 Gen 0 垃圾，且閒置時照樣運轉。
+   文件把優先序第二的預算投入在只有它十分之一大小的目標上。
+
+4. 建議：
+   插入 Phase 0（低風險、約 40 行、消除約 95% 熱路徑配置），
+   先補測試，再做 Phase 1；
+   Phase 4 保留設計但不與本次工作同時執行；
+   Phase 2 重新定位為「長 Pull 記憶體與 finalization 工作空間」，
+   移出 Zero-Stutter 主線，不從規劃中刪除；
+   刪除 Phase 3（實測 7.11 次／秒，數量級上不是瓶頸），
+   僅保留其中零風險的 FormatActionEffect 移除。
+
+5. 本次評估未修改任何程式碼。
+
+
+十一、修訂紀錄
+
+2026-08-12 第二版，依同儕審查意見修訂：
+
+1. 修正第五節：Dalamud Status 在現行 master 為 readonly struct，
+   以 IStatus? 回傳時裝箱，非 class 直接配置。
+   單一物件仍約 24 bytes，配置數量與速率推算不變。
+
+2. 補強第八節 0b：新增逐欄位等價性證明，並標出唯一實質陷阱——
+   Dalamud 的 SourceId 取 GameObjectId.ObjectId（低 32 位元），
+   原生改寫若直接轉型整個 ulong 會產生不同結果。
+   初版「直接讀取四個欄位」的敘述在此點上不精確，已更正。
+
+3. 補強第八節 0b：將「NumValidStatuses 是否緊密排列」明確切割為
+   獨立議題。該疑慮屬於「迴圈上界」的既有性質，與「存取機制」無關；
+   維持相同上界的原生改寫在建構上即為行為保持。
+
+4. 第七節第三階段由「同意先量測再決定」改為「建議直接刪除」，
+   並補上實測密度數據。同時撤回初版提出的
+   「把 Original() 提前呼叫」建議：pointer 有效性無法從原始碼證明，
+   而為一條 7 Hz 路徑承擔該風險不划算。
+
+
+2026-08-12 第三版，依第二輪同儕審查修訂。以下七項為接受的更正：
+
+1. 撤回「StatusList 是 stutter 的實際來源」。改為「原始碼已確認的高頻
+   配置來源，最值得優先消除的候選」。所有 MiB／秒為模型推算，
+   其輸入假設為：以 recorded frame 的 56.24 actors 近似每 callback 的
+   BattleChara 數、假設各 actor status 數一致、假設 FPS 穩定。
+
+2. 撤回「Phase 0a 約 5 行」。naive IsRecording 短路會破壞自動 Pull 啟動，
+   與本文第七節自述的排序陷阱是同一個問題，屬本文內部矛盾。
+
+3. 撤回「Phase 0 + Phase 1 達成穩態零配置」。與本文自己的 592 物件／秒
+   數據矛盾。改為依 callback 類型分別陳述。
+
+4. 撤回「FormatEvent／FormatActionEffect 改為延遲求值」。
+   Draw 頻率（60 至 144 Hz）高於格式化頻率（10 Hz），單純 lazy 更差。
+   改為 lazy ＋ identity-keyed cache。
+
+5. 撤回「Dictionary<ulong, string>」。改為 objectIndex 索引的固定陣列。
+
+6. 撤回「刪除 Phase 2」。改為重新定位為長 Pull 記憶體與 finalization
+   工作空間，移出 Zero-Stutter 主線但保留於規劃。
+
+7. 撤回「Phase 4 可平行進行」。它不改善 stutter，僅影響 Developer/Test
+   大型 fixture 流程；除非該流程已受阻或另有要求，否則不與本次工作並行。
+
+仍保留的兩點分歧（程度差異，非方向差異）：
+
+A. 原生 StatusManager 的等價性已由原始碼逐欄位證明，
+   在維持相同上界的前提下不需要實機 A／B 比對。
+   但接受把它排到 profiling 之後——見第十二節的殘餘量估算，
+   在快取化 ＋ 10 Hz 之後殘餘可能已低到不值得動。
+
+B. Action Effect Channel 的實測密度（7.11 次／秒、峰值 18 次／秒）
+   在數量級上已足以否決該階段。接受保留為「量測後決定」，
+   但預期量測結果只會確認否決。
+
+
+十二、收斂後的執行順序
+
+步驟 0（新增，必要前置）：建立 profiling 基線。
+
+  第十一節第一項要求不得在未量測前宣稱因果。該要求反過來意味著
+  基線必須先於任何修改建立，否則步驟 I 的事後量測沒有比較對象，
+  永遠無法驗證或否證歸因。基線至少應涵蓋：
+
+    - frame-time 分布（p50／p95／p99／max）
+    - Gen 0／Gen 1 回收次數與間隔
+    - 每個 Framework callback 的 allocated bytes
+    - 四種情境分別量測：
+        閒置＋Probe 關閉、閒置＋Probe 開啟、
+        戰鬥＋Probe 關閉、戰鬥＋Probe 開啟
+
+  第四種與第一種的差值，即可直接證實或否證本文第五節的歸因。
+
+執行分為兩條互不相依的軌道，可同時進行。
+
+軌道一（無相依、無行為變更、可立即送出）：
+
+  T1-a  StatusList 與 Length 改為單次區域快取。
+        每 actor 每 callback 由 (2S+2) 個 StatusList ＋ S 個 Status
+        降為 1 個 StatusList ＋ S 個 Status。
+  T1-b  Actor 名稱快取改為 objectIndex 固定陣列。
+  T1-c  FormatEvent／FormatActionEffect 改為 lazy ＋ identity cache，
+        含移除 Action Effect hook 持鎖路徑上的字串建構。
+
+  三項均不動採樣排程、不動資料契約、不需修改既有測試。
+
+軌道二（嚴格循序）：
+
+  T2-a  抽出 deterministic sampling scheduler／單調時鐘接縫。
+        此項同時滿足三個目標：可測試性、原文件第三節第二項要求的
+        「取樣排程只有一個 owner」、以及兩段式 API 的前提。
+  T2-b  補 cadence／首樣本／低 FPS 不補假 Frame／Gap count 測試，
+        以純數值驅動（0→Sample、99→None、100→Sample、
+        199→None、200→Sample、550→Sample＋正確 gaps），
+        不使用 Thread.Sleep。
+  T2-c  實作 BeginFrame → SampleNow → SubmitSample 兩段式 API。
+  T2-d  未錄製且 Probe 關閉時跳過完整掃描（必須在 T2-c 之後）。
+  T2-e  Probe-only 顯示節流。
+        注意：應由 T2-a 的同一個 scheduler 服務，僅消費者不同；
+        不可另建第二個 100 ms 計時器，否則違反單一 owner 原則。
+
+步驟 I：重跑步驟 0 的同一組量測，與基線比較。
+
+步驟 J：只有量測仍顯示瓶頸時，才依序考慮
+        native Status reader、segmented buffer、Channel。
+
+殘餘量估算（供步驟 J 決策參考，同為模型推算）：
+
+  軌道一 T1-a ＋ 軌道二完成後，status wrapper 殘餘
+  約 (1+S) × 56.24 × 10 物件／秒。S=10 時約 6,200 物件／秒、
+  約 148 KB／秒。作為對照，第二階段所針對的採樣配置約 40 KB／秒。
+
+  兩者皆已進入低量級。因此步驟 J 極可能全部不需要執行——
+  這正是先量測再決定的價值所在。
+
+與初版最大的差異：初版把軌道一的三項掛在「Phase 0」名下並暗示
+可先於 lifecycle 重構完成，其中 0a 實際上不可分離。
+第三版把可分離者（T1-a／b／c）與不可分離者（T2-d）明確拆開，
+使最便宜的收益不必排隊等在最高風險的重構之後。

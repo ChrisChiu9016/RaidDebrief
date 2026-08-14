@@ -44,8 +44,19 @@ internal sealed class ProbeWindow : Window, IDisposable
         };
     }
 
-    public void Dispose()
+    public void Dispose() =>
+        this.probe.SetProbeRefreshEnabled(false);
+
+    public override void OnOpen()
     {
+        this.probe.SetProbeRefreshEnabled(true);
+        base.OnOpen();
+    }
+
+    public override void OnClose()
+    {
+        this.probe.SetProbeRefreshEnabled(false);
+        base.OnClose();
     }
 
     public override void Draw()
@@ -83,12 +94,24 @@ internal sealed class ProbeWindow : Window, IDisposable
         ImGui.TextUnformatted(
             $"Duty instance：{FormatBoolean(this.probe.IsInDutyInstance)}  InCombat：{FormatBoolean(this.probe.InCombat)}");
         ImGui.TextUnformatted($"Framework thread：{FormatBoolean(this.probe.IsOnFrameworkThread)}");
-        ImGui.TextUnformatted(
-            $"ObjectTable：Player {this.probe.PlayerCount} / Battle NPC {this.probe.BattleNpcCount}");
+        if (this.probe.IsInDutyInstance || this.captureService.IsRecording)
+        {
+            ImGui.TextUnformatted(
+                $"ObjectTable：Player {this.probe.PlayerCount} / Battle NPC {this.probe.BattleNpcCount}");
+        }
+        else
+        {
+            ImGui.TextDisabled(
+                "閒置狀態：instance 外僅執行 lifecycle gate，不掃描 Party / Actor / Status。");
+        }
+
         ImGui.TextUnformatted(
             $"Framework probe：{this.probe.LastCallbackMilliseconds:F3} ms  最大 {this.probe.MaximumCallbackMilliseconds:F3} ms");
         ImGui.TextUnformatted(
-            $"Updates：{this.probe.UpdateCount:N0}  Errors：{this.probe.ErrorCount:N0}  " +
+            $"Framework callbacks：{this.probe.FrameworkCallbackCount:N0}  " +
+            $"Full scans：{this.probe.FullScanCount:N0}");
+        ImGui.TextUnformatted(
+            $"Errors：{this.probe.ErrorCount:N0}  " +
             $"略過失效 Actor：{this.probe.RejectedVolatileActorReadCount:N0}");
 
         if (this.probe.LastError is not null)

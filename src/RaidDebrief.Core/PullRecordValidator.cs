@@ -51,6 +51,47 @@ public static class PullRecordValidator
         {
             throw new InvalidDataException("Capture Target Marker frames are missing.");
         }
+        if (record.ActionNames is null)
+        {
+            throw new InvalidDataException("Capture Action names are missing.");
+        }
+
+        var actionNameIds = new HashSet<uint>();
+        foreach (var actionName in record.ActionNames)
+        {
+            if (actionName is null)
+            {
+                throw new InvalidDataException("Capture contains a null Action name.");
+            }
+
+            if (actionName.ActionId == 0 || !actionNameIds.Add(actionName.ActionId))
+            {
+                throw new InvalidDataException(
+                    $"Duplicate or invalid Action name ID {actionName.ActionId}.");
+            }
+
+            if (string.IsNullOrWhiteSpace(actionName.Name)
+                || actionName.Name.StartsWith("_rsv_", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Action {actionName.ActionId} has an unresolved or empty recorded name.");
+            }
+
+            if (string.IsNullOrWhiteSpace(actionName.Language)
+                || !Enum.IsDefined(actionName.Source))
+            {
+                throw new InvalidDataException(
+                    $"Action {actionName.ActionId} has invalid name metadata.");
+            }
+        }
+
+        if (record.ActionNames.Length > 0
+            && (record.Features & CaptureFeatures.ActionNameSnapshot) == 0)
+        {
+            throw new InvalidDataException(
+                "Recorded Action names require the ActionNameSnapshot capture feature.");
+        }
+
 
         var actorIds = new HashSet<int>();
         var gameObjectIds = new HashSet<ulong>();

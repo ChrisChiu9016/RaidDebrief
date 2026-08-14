@@ -8,7 +8,6 @@ internal enum ReplayCombatAction
 }
 
 internal readonly record struct ReplayCombatDecision(
-    bool CanOpen,
     ReplayCombatAction Action);
 internal readonly record struct ReplayFramePolicy(
     bool ShouldDraw,
@@ -17,14 +16,10 @@ internal readonly record struct ReplayFramePolicy(
     public static ReplayFramePolicy Resolve(
         bool isOpen,
         bool inCombat,
-        bool isPlaying,
-        bool closeReplayOnCombatStart)
-    {
-        var shouldDraw = isOpen && (!inCombat || !closeReplayOnCombatStart);
-        return new ReplayFramePolicy(
-            shouldDraw,
-            shouldDraw && !inCombat && isPlaying);
-    }
+        bool isPlaying) =>
+        new(
+            ShouldDraw: isOpen,
+            ShouldAdvance: isOpen && !inCombat && isPlaying);
 }
 
 
@@ -34,7 +29,6 @@ internal sealed class ReplayCombatGate
 
     public bool InCombat => this.inCombat;
 
-    public bool CanOpen => !this.inCombat;
 
     public ReplayCombatDecision Observe(
         bool inCombat,
@@ -43,14 +37,15 @@ internal sealed class ReplayCombatGate
         bool hasPendingLoad,
         bool closeReplayOnCombatStart)
     {
+        var enteredCombat = !this.inCombat && inCombat;
         this.inCombat = inCombat;
-        var action = inCombat && (isReplayOpen || isPlaying || hasPendingLoad)
+        var action = enteredCombat && (isReplayOpen || isPlaying || hasPendingLoad)
             ? closeReplayOnCombatStart
                 ? ReplayCombatAction.HideAndPause
                 : isPlaying || hasPendingLoad
                     ? ReplayCombatAction.Pause
                     : ReplayCombatAction.None
             : ReplayCombatAction.None;
-        return new ReplayCombatDecision(!inCombat, action);
+        return new ReplayCombatDecision(action);
     }
 }

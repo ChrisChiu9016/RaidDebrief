@@ -95,6 +95,29 @@ public sealed class DebriefSummaryControllerTests
     }
 
     [Fact]
+    public void SamePullIsPresentedOnceAndDoesNotReopenAfterWindowClose()
+    {
+        var controller = new DebriefSummaryController();
+        var firstPull = CreateRecord("6268db2e-4e20-4285-b413-3b6b87d22d66");
+        var firstWipe = CreateSnapshot(1, firstPull, PullEndReason.DutyWiped);
+
+        controller.Observe(firstWipe, inCombat: false, enabled: true);
+        Assert.True(controller.TryBeginPresentation());
+
+        // Window.IsOpen becomes false when the user presses X. Re-observing the
+        // same completed generation must not request another presentation.
+        controller.Observe(firstWipe, inCombat: false, enabled: true);
+        Assert.False(controller.TryBeginPresentation());
+
+        var secondPull = CreateRecord("ca0315ad-322d-4e44-b3ca-fcc2dbd25f09");
+        controller.Observe(
+            CreateSnapshot(2, secondPull, PullEndReason.DutyWiped),
+            inCombat: false,
+            enabled: true);
+        Assert.True(controller.TryBeginPresentation());
+    }
+
+    [Fact]
     public void OneClickRequestTargetsExactGenerationAndStartsPausedAtSuggestedTime()
     {
         var record = CreateRecord("785449f9-0d9c-49e6-a084-d6f6f2572bd0");

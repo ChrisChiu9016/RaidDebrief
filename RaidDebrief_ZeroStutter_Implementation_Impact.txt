@@ -27,9 +27,11 @@ Raid Debrief：10 Hz 完整資料提取優先方案與 Zero-Allocation 條件式
   Replay 通過。最新 x64 DLL 已 post-build hot reload。
 - current-build Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` 已完成約
   13.9 分鐘的 `DutyWiped` finalization／validation，並由 Runtime Replay
-  以相同 CaptureId、frame／event 數直接載入；其輸出檢查與修改前後
-  callback allocation／GC／frame-time profiling 尚未完成。因此「zero stutter」
-  仍是目標名稱，不是驗證結論。
+  以相同 CaptureId、frame／event 數直接載入。代表性 current-build manual
+  Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d` 的 raw sampling、
+  Player／Boss continuity、Barrier／Status 與完整 observed-Cast ActionName
+  輸出已通過；修改前後 callback allocation／GC／frame-time profiling 尚未完成。
+  因此「zero stutter」仍是目標名稱，不是驗證結論。
 
 下方第一部分保留原始設計／影響分析；其中「目前每個 Framework.Update
 完整掃描」描述的是修改前 baseline，不是現況。

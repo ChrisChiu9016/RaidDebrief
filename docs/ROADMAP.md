@@ -100,7 +100,7 @@ MVP success condition:
 > After a wipe, the player can identify the first death and open a useful replay window within a few seconds.
 
 ## Phase 5 — Replay UX
-Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Current-build manual Replay checks also passed for DRK and GNB invulnerability statuses and, on Runtime Pull `0619f062-21aa-44d7-aa6d-f9727f614059`, playback controls, Actor／Focus, Boss HP／Cast, Death Timeline／Quick Jump, and The Blackest Night Barrier／Status presentation at 00:47. Full visual acceptance plus inspection of a current-build Pull's Barrier／Action-name／Actor raw output remain required.
+Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Current-build manual Replay checks also passed for DRK and GNB invulnerability statuses and, on Runtime Pull `0619f062-21aa-44d7-aa6d-f9727f614059`, playback controls, Actor／Focus, Boss HP／Cast, Death Timeline／Quick Jump, and The Blackest Night Barrier／Status presentation. Representative current-build raw Barrier／Action-name／Actor／sampling output passed on manual Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d`. Other status families and full visual-surface acceptance remain required.
 
 Implemented:
 - Fixed three-column hierarchy: compact Pull／Party, Boss＋Arena, and Actor／Death context
@@ -117,7 +117,7 @@ Deliberately absent from the formal surface:
 - Recent-event feed, DPS／HPS, rankings, mitigation scoring, blame, strategy, or recommended action
 
 ## Phase 6 — Stability
-Status: Capture performance hardening is implemented and automated. The single-owner 10 Hz scheduler, two-stage Framework scan, immediate first sample, gap accounting, closed-Probe no-scan path, per-slot Actor-name cache, single-access StatusList scan, and lazy diagnostics are in place. Current build `66043fb5-d46b-48ba-9048-a25f53190b2a` completed and validated after 8,341 frames, 14,156 events, and 6,262 Action Effects; output inspection and comparative frame-time／allocation／GC profiling remain pending, so no “zero stutter” causality claim is accepted.
+Status: Capture performance hardening is implemented and automated. The single-owner 10 Hz scheduler, two-stage Framework scan, immediate first sample, gap accounting, closed-Probe no-scan path, per-slot Actor-name cache, single-access StatusList scan, and lazy diagnostics are in place. Current build `66043fb5-d46b-48ba-9048-a25f53190b2a` completed and validated after 8,341 frames, 14,156 events, and 6,262 Action Effects. Representative current-build manual Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d` passed raw sampling, Player／Boss continuity, Barrier／Status, and complete observed-Cast Action-name inspection. Comparative frame-time／allocation／GC profiling and long-Pull-specific raw inspection remain pending, so no “zero stutter” causality claim is accepted.
 
 Implemented hardening:
 - Lightweight combat／duty lifecycle observation remains per Framework update.

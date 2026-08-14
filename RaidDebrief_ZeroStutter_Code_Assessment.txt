@@ -19,8 +19,10 @@ Raid Debrief：Zero-Stutter 方案與現有實作對照評估
 - 最新 x64 DLL 已依 configured path post-build hot reload；current-build Pull
   `66043fb5-d46b-48ba-9048-a25f53190b2a` 已在約 13.9 分鐘後以 8,341 frames
   完成 `DutyWiped` finalization／validation，Runtime Replay 隨後以相同
-  CaptureId、frame／event 數直接載入。輸出檢查與修改前後 callback
-  allocation／GC／frame-time profiling 仍未建立，因此本文原先指出的
+  CaptureId、frame／event 數直接載入。另以 current-build manual Capture
+  `1661a50a-7961-4b95-a0c7-c9aca5e85c2d` 驗證 raw sampling、Player／Boss
+  continuity、Barrier／Status 與完整 observed-Cast ActionName 輸出。修改前後
+  callback allocation／GC／frame-time profiling 仍未建立，因此本文原先指出的
   「stutter 候選」尚不能改寫成已證實原因或「zero stutter」完成宣告。
 - 本文其餘各節是實作前評估紀錄；目前權威契約見 docs/ARCHITECTURE.md，
   驗證狀態見 docs/TEST_RECORDS.md。

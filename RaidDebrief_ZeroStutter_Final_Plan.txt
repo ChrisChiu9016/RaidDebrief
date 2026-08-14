@@ -27,8 +27,11 @@ Raid Debrief：Zero-Stutter 最終實作計畫
   實機：current-build Pull 66043fb5-d46b-48ba-9048-a25f53190b2a 已完成
         約 13.9 分鐘的 DutyWiped finalization／validation，並由 Runtime
         Replay 以相同 CaptureId、frame／event 數直接載入。
-  待辦：Actor／Barrier／ActionName 輸出與 sampling diagnostics 檢查，
-        以及修改前後 callback allocation／GC／frame-time 比較。
+  輸出：current-build manual Capture 1661a50a-7961-4b95-a0c7-c9aca5e85c2d
+        的 raw sampling、Player／Boss continuity、Barrier／Status 與
+        完整 observed-Cast ActionName 輸出已通過。
+  待辦：修改前後 callback allocation／GC／frame-time 比較；原 13.9 分鐘
+        Runtime-only Pull 的 raw output 已因後續 Pull 取代而不可檢查。
 
 下方步驟保留原始決策與驗收理由；「步驟 0 profiling 基線」仍未完成，
 不得因其他步驟已實作而宣稱 zero stutter。

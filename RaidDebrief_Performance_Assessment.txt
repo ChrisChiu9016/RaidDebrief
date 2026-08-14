@@ -230,7 +230,11 @@ LiveDataProbe 只在 CaptureActorsNow 時掃描 Party／ObjectTable／StatusList
 - 最新 DLL post-reload Pull `66043fb5-d46b-48ba-9048-a25f53190b2a` 已於
   約 13.9 分鐘後以 8,341 frames／14,156 events／6,262 Action Effects 完成
   `DutyWiped` finalization／validation，並由 Runtime Replay 以相同 CaptureId、
-  frame／event 數直接載入；內容與 sampling diagnostics 尚待檢查。
+  frame／event 數直接載入。
+- 代表性 current-build manual Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d`
+  的 262 Frames 為嚴格遞增、96–104 ms 間隔、平均 99.996 ms；Player／Boss
+  每幀連續，Barrier／Status 與兩個 observed Cast 的 ActionName 輸出通過。
+  原 13.9 分鐘 Pull 的 raw output 已隨 Runtime 更新而不可用。
 - 比較式 callback allocation／GC／frame-time profiling：未完成。
 
 十二、最終判定

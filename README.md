@@ -43,22 +43,3 @@ Release 建置會由 DalamudPackager 產生：
 - `src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief/RaidDebrief.json` — 由 `src/RaidDebrief.Plugin/RaidDebrief.json` 與組件版本合併出的 manifest。
 
 測試：`dotnet test RaidDebrief.sln`。`testdata/` 是本機專用、不上傳 GitHub 的錄製資料；缺少 fixture 時，相依的錄製回歸測試會在編譯期排除並發出建置警告，其餘測試照常執行。
-
-## 發布流程
-
-1. 更新 `src/RaidDebrief.Plugin/RaidDebrief.Plugin.csproj` 的 `<Version>`。
-2. 推送 `v<版本>` 標籤，例如 `git tag v0.1.0.0 && git push origin v0.1.0.0`。
-3. [`.github/workflows/release.yml`](.github/workflows/release.yml) 會：
-   - 下載對應的 Dalamud，建置 `Release|x64`；
-   - 驗證封裝版本與標籤一致；
-   - 建立 GitHub Release 並上傳 `RaidDebrief.zip`、`RaidDebrief.json`；
-   - 執行 `scripts/update-repo-json.ps1` 更新 `repo.json` 並提交回預設分支。
-
-`repo.json` 由工作流程維護，即安裝說明中那個自訂儲存庫網址所指向的檔案；除非要調整 `IsHide`、測試版通道等 store-only 欄位，否則不需要手動編輯。
-手動重建（例如補上遺失的一次發布）：
-
-```powershell
-./scripts/update-repo-json.ps1 `
-    -ManifestPath src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief/RaidDebrief.json `
-    -DownloadUrl https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v0.1.0.0/RaidDebrief.zip
-```

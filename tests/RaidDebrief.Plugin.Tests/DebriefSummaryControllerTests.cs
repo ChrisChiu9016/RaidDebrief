@@ -167,6 +167,41 @@ public sealed class DebriefSummaryControllerTests
         Assert.True(developerRestored.DeveloperModeEnabled);
     }
 
+    [Fact]
+    public void DebriefDeathLabelUsesRecordedJobRatherThanTheCaptureAlias()
+    {
+        // Capture anonymizes every player character to a Pull-local alias, so the
+        // recorded Job is the only identity worth presenting after a Wipe.
+        Assert.Equal(
+            "RPR",
+            DebriefSummaryWindow.ResolveDeathLabel(CreateDeathEntry(1, 0, classJobId: 39)));
+        Assert.Equal(
+            "Player 1",
+            DebriefSummaryWindow.ResolveDeathLabel(CreateDeathEntry(1, 0, classJobId: 0)));
+    }
+
+    [Fact]
+    public void DebriefSequenceGroupsDeathsOnTheSharedFiveSecondRule()
+    {
+        // The summary and Death Quick Jump must never disagree about what one
+        // cluster is, so both resolve membership through the same predicate.
+        Assert.True(ReplayWindow.IsWithinDeathCluster(10_000, 15_000));
+        Assert.False(ReplayWindow.IsWithinDeathCluster(10_000, 15_001));
+        Assert.False(ReplayWindow.IsWithinDeathCluster(10_000, 9_999));
+        Assert.True(ReplayWindow.IsWithinDeathCluster(10_000, 10_000));
+    }
+
+    private static DebriefDeathEntry CreateDeathEntry(
+        int stableActorId,
+        long timestampMilliseconds,
+        uint classJobId) =>
+        new(
+            timestampMilliseconds,
+            stableActorId,
+            stableActorId,
+            $"Player {stableActorId}",
+            classJobId);
+
     private static ReplaySourceSnapshot CreateSnapshot(
         long completedGeneration,
         PullRecord record,

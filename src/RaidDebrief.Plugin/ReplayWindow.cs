@@ -3940,20 +3940,27 @@ internal sealed class ReplayWindow : Window, IDisposable
 
         var firstTimestamp = deaths[clusterStart].Correlation.DeathTimestampMilliseconds;
         var clusterEnd = clusterStart + 1;
-        while (clusterEnd < deaths.Length)
+        while (clusterEnd < deaths.Length
+               && IsWithinDeathCluster(
+                   firstTimestamp,
+                   deaths[clusterEnd].Correlation.DeathTimestampMilliseconds))
         {
-            var delta = deaths[clusterEnd].Correlation.DeathTimestampMilliseconds
-                - firstTimestamp;
-            if (delta < 0 || delta > DeathQuickJumpClusterWindowMilliseconds)
-            {
-                break;
-            }
-
             clusterEnd++;
         }
 
         return clusterEnd;
     }
+
+    /// <summary>
+    /// One shared grouping rule for every death cluster presentation. Callers keep
+    /// their own typed loop so no surface has to materialize a timestamp collection
+    /// per frame.
+    /// </summary>
+    internal static bool IsWithinDeathCluster(
+        long firstTimestampMilliseconds,
+        long candidateTimestampMilliseconds) =>
+        candidateTimestampMilliseconds - firstTimestampMilliseconds
+            is >= 0 and <= DeathQuickJumpClusterWindowMilliseconds;
 
     private void DrawDeathQuickJumpClusterCard(
         ReplaySession replay,

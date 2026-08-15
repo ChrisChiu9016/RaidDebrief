@@ -1,28 +1,28 @@
 [
   {
-      "Author":  "LeScent",
-      "Name":  "Raid Debrief",
-      "InternalName":  "RaidDebrief",
-      "Punchline":  "快速確認最近一次高難度戰鬥發生了什麼。",
-      "Description":  "使用 /rdb 或 /rdebrief 開啟最近一次 Pull 的 Replay 主畫面。",
-      "AssemblyVersion":  "1.0.1.0",
-      "RepoUrl":  "https://github.com/ChrisChiu9016/RaidDebrief",
-      "ApplicableVersion":  "any",
-      "DalamudApiLevel":  15,
-      "Tags":  [
-                   "raid",
-                   "replay",
-                   "testing"
-               ],
-      "LoadPriority":  0,
-      "IconUrl":  "https://raw.githubusercontent.com/ChrisChiu9016/RaidDebrief/main/images/icon.png",
-      "AcceptsFeedback":  true,
-      "IsHide":  false,
-      "IsTestingExclusive":  false,
-      "DownloadCount":  0,
-      "DownloadLinkInstall":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
-      "DownloadLinkUpdate":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
-      "DownloadLinkTesting":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
-      "LastUpdate":  1786801821
+    "Author": "LeScent",
+    "Name": "Raid Debrief",
+    "InternalName": "RaidDebrief",
+    "Punchline": "快速確認最近一次高難度戰鬥發生了什麼。",
+    "Description": "使用 /rdb 或 /rdebrief 開啟最近一次 Pull 的 Replay 主畫面。",
+    "AssemblyVersion": "1.0.1.0",
+    "RepoUrl": "https://github.com/ChrisChiu9016/RaidDebrief",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "Tags": [
+      "raid",
+      "replay",
+      "testing"
+    ],
+    "LoadPriority": 0,
+    "IconUrl": "https://raw.githubusercontent.com/ChrisChiu9016/RaidDebrief/main/images/icon.png",
+    "AcceptsFeedback": true,
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "DownloadCount": 0,
+    "DownloadLinkInstall": "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
+    "DownloadLinkUpdate": "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
+    "DownloadLinkTesting": "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v1.0.1.0/RaidDebrief.zip",
+    "LastUpdate": 1786801913
   }
 ]

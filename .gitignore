@@ -1,8 +1,34 @@
-**/bin/
-**/obj/
+# Build output
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# IDE / editor
 .vs/
+.vscode/
 .idea/
 *.user
 *.suo
+*.userprefs
 
-.omp/*.png
+# Test output
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+*.lnk
+
+# Agent workspace: keep only the shared project rules
+.omp/*
+!.omp/AGENTS.md
+
+# Local scratch prompts and notes
+prompt.txt
+指令.txt
+
+# Recorded capture fixtures stay local; they are never published to GitHub
+testdata/

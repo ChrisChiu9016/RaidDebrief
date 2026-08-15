@@ -1,3 +1,4 @@
+#if RECORDED_FIXTURES
 using System.Security.Cryptography;
 using System.Text.Json;
 using RaidDebrief.Core;
@@ -207,3 +208,4 @@ public sealed class RecordedFixtureTests
         }
     }
 }
+#endif

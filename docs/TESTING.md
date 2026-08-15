@@ -221,12 +221,18 @@ testdata/
 └─ recorded/
 ```
 
+`testdata/` is local-only and is never committed or published to GitHub; the directory is git-ignored.
+Fixture-dependent tests compile only when the recording is present: the test projects define `RECORDED_FIXTURES`
+when `testdata/recorded/6fe1b80f-567a-41a3-8912-6d013c137aa7.json` (Core) or `testdata/recorded/P10S.json` (UI)
+exists, and emit a build warning naming the exclusion when they are absent. A machine without the fixtures still
+builds and runs the remaining suite; recorded-pull regressions must be run on a machine that has them.
+
 Real recordings may contain player-identifying information. New captures must:
 - serialize every player-character name as a Pull-local `Player N` alias
 - retain NPC names for encounter analysis
 - contain no Content ID field
 
-Historical captures created before anonymization must be reviewed before committing or sharing. Never commit a raw private-party recording.
+Historical captures created before anonymization must be reviewed before sharing. Never share a raw private-party recording.
 
 ## 5. Performance Testing
 Measure at minimum:

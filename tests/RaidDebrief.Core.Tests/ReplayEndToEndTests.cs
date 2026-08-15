@@ -5,6 +5,7 @@ namespace RaidDebrief.Core.Tests;
 
 public sealed class ReplayEndToEndTests
 {
+#if RECORDED_FIXTURES
     private const string RecordedCaptureId = "6fe1b80f-567a-41a3-8912-6d013c137aa7";
 
     private static readonly string RecordedFixturePath = Path.Combine(
@@ -61,6 +62,7 @@ public sealed class ReplayEndToEndTests
             Assert.Equal(forwardHashes[index], ComputeSceneHash(replay));
         }
     }
+#endif
 
     [Fact]
     public void CompositeReplaySynchronizesDeathRevivalWaymarksAndBossLifecycle()

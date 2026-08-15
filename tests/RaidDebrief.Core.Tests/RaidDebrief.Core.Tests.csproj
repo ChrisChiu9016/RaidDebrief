@@ -17,12 +17,21 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\RaidDebrief.Core\RaidDebrief.Core.csproj" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="..\..\testdata\recorded\6fe1b80f-567a-41a3-8912-6d013c137aa7.json"
+  <PropertyGroup>
+    <RecordedFixtureDirectory>$(MSBuildThisFileDirectory)..\..\testdata\recorded\</RecordedFixtureDirectory>
+    <RecordedCaptureFixture>$(RecordedFixtureDirectory)6fe1b80f-567a-41a3-8912-6d013c137aa7.json</RecordedCaptureFixture>
+    <HasRecordedFixtures Condition="Exists('$(RecordedCaptureFixture)')">true</HasRecordedFixtures>
+    <DefineConstants Condition="'$(HasRecordedFixtures)' == 'true'">$(DefineConstants);RECORDED_FIXTURES</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(HasRecordedFixtures)' == 'true'">
+    <None Include="$(RecordedCaptureFixture)"
           Link="testdata\recorded\6fe1b80f-567a-41a3-8912-6d013c137aa7.json"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\testdata\recorded\6fe1b80f-567a-41a3-8912-6d013c137aa7.provenance.json"
+    <None Include="$(RecordedFixtureDirectory)6fe1b80f-567a-41a3-8912-6d013c137aa7.provenance.json"
           Link="testdata\recorded\6fe1b80f-567a-41a3-8912-6d013c137aa7.provenance.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="WarnAboutMissingRecordedFixtures" BeforeTargets="Build" Condition="'$(HasRecordedFixtures)' != 'true'">
+    <Warning Text="Recorded capture fixtures are missing from testdata/recorded; recorded-pull tests are excluded from this build. See docs/TESTING.md." />
+  </Target>
 </Project>

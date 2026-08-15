@@ -7,11 +7,13 @@ namespace RaidDebrief.UI.Tests;
 
 public sealed class SvgArenaRendererTests
 {
+#if RECORDED_FIXTURES
     private static readonly string P10SFixturePath = Path.Combine(
         AppContext.BaseDirectory,
         "testdata",
         "recorded",
         "P10S.json");
+#endif
 
     [Fact]
     public void RendersDeterministicValidSvgWithoutUntargetableActorsOrMarkers()
@@ -74,6 +76,7 @@ public sealed class SvgArenaRendererTests
         Assert.Contains(".arena{fill:#172638", svg, StringComparison.Ordinal);
     }
 
+#if RECORDED_FIXTURES
     [Fact]
     public void P10SObservedArenaUsesNeutralGenericSquareBackground()
     {
@@ -96,6 +99,7 @@ public sealed class SvgArenaRendererTests
         Assert.Contains("<rect class=\"arena arena-generic\"", svg, StringComparison.Ordinal);
         Assert.Contains(".arena{fill:#172638", svg, StringComparison.Ordinal);
     }
+#endif
 
 
     [Fact]

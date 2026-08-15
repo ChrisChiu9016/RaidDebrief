@@ -18,9 +18,18 @@
     <ProjectReference Include="..\..\src\RaidDebrief.Core\RaidDebrief.Core.csproj" />
     <ProjectReference Include="..\..\src\RaidDebrief.UI\RaidDebrief.UI.csproj" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="..\..\testdata\recorded\P10S.json"
+  <PropertyGroup>
+    <RecordedFixtureDirectory>$(MSBuildThisFileDirectory)..\..\testdata\recorded\</RecordedFixtureDirectory>
+    <P10SFixture>$(RecordedFixtureDirectory)P10S.json</P10SFixture>
+    <HasRecordedFixtures Condition="Exists('$(P10SFixture)')">true</HasRecordedFixtures>
+    <DefineConstants Condition="'$(HasRecordedFixtures)' == 'true'">$(DefineConstants);RECORDED_FIXTURES</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(HasRecordedFixtures)' == 'true'">
+    <None Include="$(P10SFixture)"
           Link="testdata\recorded\P10S.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="WarnAboutMissingRecordedFixtures" BeforeTargets="Build" Condition="'$(HasRecordedFixtures)' != 'true'">
+    <Warning Text="Recorded capture fixtures are missing from testdata/recorded; recorded-pull tests are excluded from this build. See docs/TESTING.md." />
+  </Target>
 </Project>

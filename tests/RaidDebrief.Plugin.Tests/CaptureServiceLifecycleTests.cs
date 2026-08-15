@@ -420,6 +420,7 @@ public sealed class CaptureServiceLifecycleTests
                 CaptureFeatures.ActorOwnerId
                     | CaptureFeatures.HitboxRadius
                     | CaptureFeatures.OmnidirectionalState
+                    | CaptureFeatures.PartyMembership
                     | CaptureFeatures.CastTiming
                     | CaptureFeatures.StatusTiming
                     | CaptureFeatures.ActionNameSnapshot
@@ -665,6 +666,35 @@ public sealed class CaptureServiceLifecycleTests
                 record.Events,
                 value => value.Type == ObservedEventType.StatusGained);
             Assert.Equal(19.8f, status.StatusRemainingTime);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
+    public void SoloCaptureStillDeclaresPartyMembershipCapability()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var service = CreateService(exportDirectory, dutyState, automaticCaptureEnabled: false);
+        try
+        {
+            Assert.True(service.Start(70, 80, 2));
+
+            // A solo Pull observes an empty party list; the field is still recorded, so Replay must
+            // not report it as a legacy recording limitation.
+            service.RecordFrameworkSnapshot([CreateActor("Solo Player", 601)], [], false, 70, 80, 2);
+            Assert.True(service.StopAndExport());
+
+            var record = WaitForCompleted(service, expectedCompletedPullCount: 1);
+            Assert.True((record.Features & CaptureFeatures.PartyMembership) != 0);
+            Assert.Null(Assert.Single(record.Actors).PartyIndex);
+
+            var warning = ReplayWindow.BuildCaptureFeatureWarning(record);
+            Assert.DoesNotContain("Party membership", warning ?? string.Empty, StringComparison.Ordinal);
         }
         finally
         {

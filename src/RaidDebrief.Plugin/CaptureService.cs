@@ -1026,7 +1026,6 @@ internal sealed class CaptureService : IDisposable
             new(SampleIntervalMilliseconds);
         private bool capturedTargetMarkers;
         private bool omnidirectionalityStateComplete = true;
-        private bool capturedPartyMembership;
         private bool castTimingComplete = true;
         private bool statusTimingComplete = true;
         private bool actionEffectCaptureComplete;
@@ -1123,7 +1122,6 @@ internal sealed class CaptureService : IDisposable
 
                 this.omnidirectionalityStateComplete &= actor.IsOmnidirectionalityKnown;
                 var partyIndex = FindPartyIndex(actor, partyMembers);
-                this.capturedPartyMembership |= partyMembers.Length > 0;
                 if (actor.IsCasting
                     && (!float.IsFinite(actor.CurrentCastTime)
                         || actor.CurrentCastTime < 0
@@ -1305,9 +1303,9 @@ internal sealed class CaptureService : IDisposable
                     | (this.capturedTargetMarkers
                         ? CaptureFeatures.TargetMarkers | CaptureFeatures.TargetMarkerCanonicalOrder
                         : CaptureFeatures.None)
-                    | (this.capturedPartyMembership
-                        ? CaptureFeatures.PartyMembership
-                        : CaptureFeatures.None)
+                    // Party membership is a recorded field, not an observation: every sample reads
+                    // IPartyList, so a solo Pull records "no party members", it does not lose the field.
+                    | CaptureFeatures.PartyMembership
                     | (this.castTimingComplete
                         ? CaptureFeatures.CastTiming
                         : CaptureFeatures.None)

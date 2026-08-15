@@ -73,6 +73,10 @@ function Get-Kept([string] $name, $fallback) {
     return $fallback
 }
 
+# Without an opted-in testing track, the testing link must follow the stable one; keeping a stale
+# link from an earlier release would advertise an artifact that no longer exists.
+$hasTestingTrack = ($null -ne (Get-Kept 'TestingAssemblyVersion' $null)) -or [bool] (Get-Kept 'IsTestingExclusive' $false)
+
 $entry = [ordered] @{
     Author                 = $manifest.Author
     Name                   = $manifest.Name
@@ -96,7 +100,7 @@ $entry = [ordered] @{
     DownloadCount          = [long] (Get-Kept 'DownloadCount' 0)
     DownloadLinkInstall    = $DownloadUrl
     DownloadLinkUpdate     = $DownloadUrl
-    DownloadLinkTesting    = Get-Kept 'DownloadLinkTesting' $DownloadUrl
+    DownloadLinkTesting    = if ($hasTestingTrack) { Get-Kept 'DownloadLinkTesting' $DownloadUrl } else { $DownloadUrl }
     LastUpdate             = [long] [System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
 

@@ -22,13 +22,15 @@ desktop.ini
 .DS_Store
 *.lnk
 
-# Agent workspace: keep only the shared project rules
-.omp/*
-!.omp/AGENTS.md
+# Agent workspace
+.omp/
 
 # Local scratch prompts and notes
 prompt.txt
 指令.txt
+
+# Icon artwork at full size; the published 512x512 icon is images/icon.png
+/icon.png
 
 # Recorded capture fixtures stay local; they are never published to GitHub
 testdata/

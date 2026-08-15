@@ -9,8 +9,6 @@ Raid Debrief 只回答一個問題：**剛才那把發生了什麼，能不能�
 - 2D Replay：玩家／Boss 位置、場地標記（Waymark）、目標標記、詠唱、狀態、時間軸拖曳與事件跳轉。
 - 指令：`/rdebrief`、`/rdb` 開啟 Replay 主畫面。
 
-詳細規格見 [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md)、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
-
 ## 安裝（Dalamud 自訂儲存庫）
 
 1. 遊戲內輸入 `/xlsettings`，開啟 **Experimental**（實驗性功能）分頁。

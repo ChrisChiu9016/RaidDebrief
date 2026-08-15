@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version to build, e.g. 0.1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  PLUGIN_PROJECT: src/RaidDebrief.Plugin/RaidDebrief.Plugin.csproj
+  PACKAGE_DIR: src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve version
+        id: version
+        run: |
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            '${{ inputs.version }}'
+          } else {
+            '${{ github.ref_name }}'.TrimStart('v')
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "Version '$version' must look like 1.2.3 or 1.2.3.4."
+          }
+          $parsed = [version] $version
+          $assemblyVersion = '{0}.{1}.{2}.{3}' -f $parsed.Major, $parsed.Minor, [Math]::Max($parsed.Build, 0), [Math]::Max($parsed.Revision, 0)
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "assemblyVersion=$assemblyVersion" >> $env:GITHUB_OUTPUT
+          "tag=v$assemblyVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Download Dalamud
+        run: |
+          Invoke-WebRequest https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+          Expand-Archive -Path dalamud.zip -DestinationPath "$env:RUNNER_TEMP/dalamud" -Force
+          "DALAMUD_HOME=$env:RUNNER_TEMP/dalamud" >> $env:GITHUB_ENV
+
+      - name: Restore
+        run: dotnet restore ${{ env.PLUGIN_PROJECT }}
+
+      - name: Build Release package
+        run: >
+          dotnet build ${{ env.PLUGIN_PROJECT }}
+          --configuration Release
+          -p:Platform=x64
+          -p:Version=${{ steps.version.outputs.assemblyVersion }}
+          --no-restore
+
+      - name: Stage artifact
+        id: artifact
+        run: |
+          $zip = "${{ env.PACKAGE_DIR }}/latest.zip"
+          if (-not (Test-Path $zip)) { throw "DalamudPackager produced no zip at $zip." }
+          $manifest = Get-Content "${{ env.PACKAGE_DIR }}/RaidDebrief.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($manifest.AssemblyVersion -ne '${{ steps.version.outputs.assemblyVersion }}') {
+            throw "Packaged AssemblyVersion $($manifest.AssemblyVersion) does not match the requested version."
+          }
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Copy-Item $zip artifacts/RaidDebrief.zip -Force
+          Copy-Item "${{ env.PACKAGE_DIR }}/RaidDebrief.json" artifacts/RaidDebrief.json -Force
+          "downloadUrl=https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/RaidDebrief.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ steps.version.outputs.tag }}'
+
+          $existingTag = (git tag -l $tag | Out-String).Trim()
+          if (-not $existingTag) {
+            git tag $tag
+            git push origin $tag
+            if ($LASTEXITCODE -ne 0) { throw "Failed to push tag $tag." }
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag artifacts/RaidDebrief.zip artifacts/RaidDebrief.json --clobber
+          } else {
+            gh release create $tag artifacts/RaidDebrief.zip artifacts/RaidDebrief.json --title "Raid Debrief $tag" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to publish release $tag." }
+
+      - name: Update custom repository manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $branch = '${{ github.event.repository.default_branch }}'
+
+          git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to fetch origin/$branch." }
+          git checkout -B $branch "origin/$branch"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to check out $branch." }
+
+          ./scripts/update-repo-json.ps1 `
+            -ManifestPath artifacts/RaidDebrief.json `
+            -DownloadUrl '${{ steps.artifact.outputs.downloadUrl }}' `
+            -Version '${{ steps.version.outputs.assemblyVersion }}'
+
+          $pending = git status --porcelain repo.json | Out-String
+          if ($pending.Trim()) {
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add repo.json
+            git commit -m "Publish RaidDebrief ${{ steps.version.outputs.assemblyVersion }} to the custom repository"
+            git push origin "HEAD:${branch}"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to push the updated repo.json." }
+          } else {
+            Write-Host 'repo.json already up to date.'
+          }

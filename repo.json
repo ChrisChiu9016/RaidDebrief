@@ -1,0 +1,27 @@
+[
+  {
+      "Author":  "Raid Debrief contributors",
+      "Name":  "Raid Debrief",
+      "InternalName":  "RaidDebrief",
+      "Punchline":  "快速確認最近一次高難度戰鬥發生了什麼。",
+      "Description":  "使用 /rdebrief 或 /rdb 開啟最近一次 Pull 的 Replay 主畫面。",
+      "AssemblyVersion":  "0.1.0.0",
+      "RepoUrl":  "https://github.com/ChrisChiu9016/RaidDebrief",
+      "ApplicableVersion":  "any",
+      "DalamudApiLevel":  15,
+      "Tags":  [
+                   "raid",
+                   "replay",
+                   "testing"
+               ],
+      "LoadPriority":  0,
+      "AcceptsFeedback":  true,
+      "IsHide":  false,
+      "IsTestingExclusive":  false,
+      "DownloadCount":  0,
+      "DownloadLinkInstall":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v0.1.0.0/RaidDebrief.zip",
+      "DownloadLinkUpdate":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v0.1.0.0/RaidDebrief.zip",
+      "DownloadLinkTesting":  "https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v0.1.0.0/RaidDebrief.zip",
+      "LastUpdate":  1786799691
+  }
+]

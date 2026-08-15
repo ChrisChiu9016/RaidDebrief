@@ -1,0 +1,64 @@
+# Raid Debrief
+
+高難度副本 Pull 結束後的**即時回放**插件（FFXIV / Dalamud）。
+
+Raid Debrief 只回答一個問題：**剛才那把發生了什麼，能不能馬上重看一次？**
+它不教機制、不評斷玩家、不取代 FFLogs／ACT，也不保存跨場次的戰鬥歷史。
+
+- Debrief Summary：Pull 長度、首殺（First Death）、死亡順序。
+- 2D Replay：玩家／Boss 位置、場地標記（Waymark）、目標標記、詠唱、狀態、時間軸拖曳與事件跳轉。
+- 指令：`/rdebrief`、`/rdb` 開啟 Replay 主畫面。
+
+詳細規格見 [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md)、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/ROADMAP.md](docs/ROADMAP.md)。
+
+## 安裝（Dalamud 自訂儲存庫）
+
+1. 遊戲內輸入 `/xlsettings`，開啟 **Experimental**（實驗性功能）分頁。
+2. 在 **Custom Plugin Repositories** 貼上：
+
+   ```text
+   https://raw.githubusercontent.com/ChrisChiu9016/RaidDebrief/main/repo.json
+   ```
+
+3. 按 **+**，然後 **Save and Close**。
+4. `/xlplugins` → **All Plugins** 搜尋 `Raid Debrief` → **Install**。
+
+需求：Dalamud API Level 15（Dalamud 15.x）。
+
+## 從原始碼建置
+
+需要 .NET 10 SDK，以及由 XIVLauncher 安裝的 Dalamud（或設定 `DALAMUD_HOME` 指向 Dalamud 目錄）。
+
+```bash
+# 開發用（Dev Plugin 熱重載使用 bin/x64/Debug/RaidDebrief.dll）
+dotnet build RaidDebrief.sln --configuration Debug -p:Platform=x64
+
+# 發布用套件
+dotnet build src/RaidDebrief.Plugin/RaidDebrief.Plugin.csproj --configuration Release -p:Platform=x64
+```
+
+Release 建置會由 DalamudPackager 產生：
+
+- `src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief/latest.zip` — 安裝用封裝。
+- `src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief/RaidDebrief.json` — 由 `src/RaidDebrief.Plugin/RaidDebrief.json` 與組件版本合併出的 manifest。
+
+測試：`dotnet test RaidDebrief.sln`。`testdata/` 是本機專用、不上傳 GitHub 的錄製資料；缺少 fixture 時，相依的錄製回歸測試會在編譯期排除並發出建置警告，其餘測試照常執行。
+
+## 發布流程
+
+1. 更新 `src/RaidDebrief.Plugin/RaidDebrief.Plugin.csproj` 的 `<Version>`。
+2. 推送 `v<版本>` 標籤，例如 `git tag v0.1.0.0 && git push origin v0.1.0.0`。
+3. [`.github/workflows/release.yml`](.github/workflows/release.yml) 會：
+   - 下載對應的 Dalamud，建置 `Release|x64`；
+   - 驗證封裝版本與標籤一致；
+   - 建立 GitHub Release 並上傳 `RaidDebrief.zip`、`RaidDebrief.json`；
+   - 執行 `scripts/update-repo-json.ps1` 更新 `repo.json` 並提交回預設分支。
+
+`repo.json` 由工作流程維護，即安裝說明中那個自訂儲存庫網址所指向的檔案；除非要調整 `IsHide`、測試版通道等 store-only 欄位，否則不需要手動編輯。
+手動重建（例如補上遺失的一次發布）：
+
+```powershell
+./scripts/update-repo-json.ps1 `
+    -ManifestPath src/RaidDebrief.Plugin/bin/x64/Release/RaidDebrief/RaidDebrief.json `
+    -DownloadUrl https://github.com/ChrisChiu9016/RaidDebrief/releases/download/v0.1.0.0/RaidDebrief.zip
+```

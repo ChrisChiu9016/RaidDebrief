@@ -4,7 +4,7 @@
     <AssemblyName>RaidDebrief</AssemblyName>
     <RootNamespace>RaidDebrief.Plugin</RootNamespace>
     <Version>0.1.0.0</Version>
-    <PackageProjectUrl>https://github.com/RaidDebrief/RaidDebrief</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/ChrisChiu9016/RaidDebrief</PackageProjectUrl>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>

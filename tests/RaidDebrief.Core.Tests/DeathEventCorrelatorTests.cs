@@ -29,6 +29,24 @@ public sealed class DeathEventCorrelatorTests
     }
 
     [Fact]
+    public void SourceActorHealEmbeddedInEnemyTargetRestoresVirtualHp()
+    {
+        var record = CreateRecord(
+            CaptureFeatures.ActionEffectCapture,
+            [
+                CreateDamage(10, 10, 1001, 600),
+                CreateSourceActorHeal(50, 11, 2001, 300),
+                CreateDamage(100, 12, 1002, 800),
+            ]);
+
+        var correlation = Assert.Single(new DeathEventCorrelator().Analyze(record));
+
+        Assert.Equal(1002u, correlation.KillingBlowCandidate?.ActionId);
+        Assert.Equal(700u, correlation.EstimatedHpBeforeHit);
+        Assert.Equal(100u, correlation.EstimatedOverkill);
+    }
+
+    [Fact]
     public void ReportsUnavailableWhenNoIncomingDamageWasRecorded()
     {
         var correlation = Assert.Single(
@@ -38,6 +56,28 @@ public sealed class DeathEventCorrelatorTests
         Assert.Null(correlation.KillingBlowCandidate);
         Assert.True(
             (correlation.Limitations & DeathCorrelationLimitations.ActionEffectCaptureUnavailable) != 0);
+    }
+
+    [Fact]
+    public void KeepsOnlyTheFiveMostRecentIncomingDamageEvents()
+    {
+        var correlation = Assert.Single(
+            new DeathEventCorrelator().Analyze(
+                CreateRecord(
+                    CaptureFeatures.ActionEffectCapture,
+                    [
+                        CreateDamage(10, 1, 1001, 50),
+                        CreateDamage(50, 2, 1002, 50),
+                        CreateDamage(100, 3, 1003, 50),
+                        CreateDamage(150, 4, 1004, 50),
+                        CreateDamage(200, 5, 1005, 50),
+                        CreateDamage(250, 6, 1006, 50),
+                        CreateDamage(290, 7, 1007, 50),
+                    ])));
+
+        Assert.Equal(
+            [1003u, 1004u, 1005u, 1006u, 1007u],
+            correlation.LastHits.Select(hit => hit.ActionId));
     }
 
     [Fact]
@@ -288,6 +328,47 @@ public sealed class DeathEventCorrelatorTests
                             Kind = ActionEffectKind.Damage,
                             RawType = ActionEffectDecoder.DamageType,
                             Param0 = 0,
+                            Param1 = 0,
+                            Param2 = 0,
+                            Param3 = 0,
+                            Param4 = 0,
+                            Value = (ushort)amount,
+                            Amount = amount,
+                            IsCritical = false,
+                            IsDirectHit = false,
+                        },
+                    ],
+                },
+            ],
+        };
+
+    private static ActionEffectRecord CreateSourceActorHeal(
+        long timestamp,
+        uint sequence,
+        uint actionId,
+        uint amount) =>
+        new()
+        {
+            TimestampMilliseconds = timestamp,
+            GlobalSequence = sequence,
+            ActionId = actionId,
+            ActionType = 1,
+            SourceObjectId = 100,
+            SourceStableActorId = 1,
+            Targets =
+            [
+                new ActionEffectTargetRecord
+                {
+                    TargetObjectId = 200,
+                    TargetStableActorId = 2,
+                    Entries =
+                    [
+                        new ActionEffectEntryRecord
+                        {
+                            Index = 1,
+                            Kind = ActionEffectKind.Heal,
+                            RawType = ActionEffectDecoder.HealType,
+                            Param0 = ActionEffectDecoder.SourceActorHealFlag,
                             Param1 = 0,
                             Param2 = 0,
                             Param3 = 0,

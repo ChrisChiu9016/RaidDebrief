@@ -316,7 +316,7 @@ public sealed class ReplayArenaViewportTests
     {
         var layout = ReplayWindow.ResolveEnemyHudLayout(
             new Vector2(100, 50),
-            new Vector2(600, 450),
+            new Vector2(800, 450),
             ReplayWindow.EnemyHudTopInset,
             hasActiveCast: true);
 
@@ -332,7 +332,7 @@ public sealed class ReplayArenaViewportTests
     public void EnemyHudGroupsStackAndInactiveCastConsumesNoSpace()
     {
         var arenaMinimum = new Vector2(100, 50);
-        var arenaMaximum = new Vector2(600, 450);
+        var arenaMaximum = new Vector2(800, 450);
         var casting = ReplayWindow.ResolveEnemyHudLayout(
             arenaMinimum,
             arenaMaximum,
@@ -356,17 +356,74 @@ public sealed class ReplayArenaViewportTests
     }
 
     [Fact]
-    public void EnemyHudWidthClampsOnlyToArenaCanvas()
+    public void SmallArenaUsesCompactEnemyHud()
     {
+        var metrics = ReplayWindow.ResolveEnemyHudMetrics(240);
         var layout = ReplayWindow.ResolveEnemyHudLayout(
             new Vector2(40, 20),
             new Vector2(280, 300),
-            ReplayWindow.EnemyHudTopInset,
+            metrics.TopInset,
             hasActiveCast: false);
 
-        Assert.Equal(216, layout.HealthBarMaximum.X - layout.HealthBarMinimum.X);
+        Assert.True(metrics.IsCompact);
+        Assert.True(layout.IsCompact);
+        Assert.Equal(220, layout.HealthBarMaximum.X - layout.HealthBarMinimum.X);
         Assert.Equal(layout.HealthBarMinimum.X, layout.CastBarMinimum.X);
         Assert.Equal(layout.HealthBarMaximum.X, layout.CastBarMaximum.X);
+        Assert.False(
+            ReplayWindow.ResolveEnemyHudMetrics(
+                ReplayWindow.EnemyHudCompactArenaWidthThreshold).IsCompact);
+    }
+
+    [Fact]
+    public void ArenaCanvasExpandsPastLegacyCapAndCentersOnShortAxis()
+    {
+        var large = ReplayWindow.ResolveArenaCanvasLayout(new Vector2(1_000, 760));
+        var wide = ReplayWindow.ResolveArenaCanvasLayout(new Vector2(1_000, 400));
+        var tall = ReplayWindow.ResolveArenaCanvasLayout(new Vector2(400, 1_000));
+
+        Assert.Equal(760, large.Size);
+        Assert.Equal(new Vector2(120, 0), large.Offset);
+        Assert.Equal(400, wide.Size);
+        Assert.Equal(new Vector2(300, 0), wide.Offset);
+        Assert.Equal(400, tall.Size);
+        Assert.Equal(new Vector2(0, 300), tall.Offset);
+    }
+
+    [Fact]
+    public void OverlappingActorLabelsRequireSelectionOrHover()
+    {
+        ArenaActorMarker[] actors =
+        [
+            CreatePlayerMarker(1, new ArenaPoint(0.50f, 0.50f)),
+            CreatePlayerMarker(2, new ArenaPoint(0.52f, 0.50f)),
+            CreatePlayerMarker(3, new ArenaPoint(0.80f, 0.50f)),
+        ];
+        var arenaMinimum = Vector2.Zero;
+        const float arenaSize = 500;
+
+        Assert.False(ReplayWindow.ShouldDrawArenaActorLabel(
+            actors, 0, arenaMinimum, arenaSize, ArenaViewport.Fit, null, null));
+        Assert.False(ReplayWindow.ShouldDrawArenaActorLabel(
+            actors, 1, arenaMinimum, arenaSize, ArenaViewport.Fit, null, null));
+        Assert.True(ReplayWindow.ShouldDrawArenaActorLabel(
+            actors, 2, arenaMinimum, arenaSize, ArenaViewport.Fit, null, null));
+        Assert.True(ReplayWindow.ShouldDrawArenaActorLabel(
+            actors, 0, arenaMinimum, arenaSize, ArenaViewport.Fit, 1, null));
+        Assert.True(ReplayWindow.ShouldDrawArenaActorLabel(
+            actors, 1, arenaMinimum, arenaSize, ArenaViewport.Fit, null, 2));
+
+        Assert.Equal(
+            2,
+            ReplayWindow.ResolveHoveredArenaActorStableId(
+                actors,
+                new Vector2(260, 250),
+                arenaMinimum,
+                arenaSize,
+                ArenaViewport.Fit));
+        Assert.Equal(2, ReplayWindow.ResolveArenaActorDrawPriority(1, 1, 2));
+        Assert.Equal(1, ReplayWindow.ResolveArenaActorDrawPriority(2, 1, 2));
+        Assert.Equal(0, ReplayWindow.ResolveArenaActorDrawPriority(3, 1, 2));
     }
 
     [Fact]
@@ -437,4 +494,33 @@ public sealed class ReplayArenaViewportTests
             enemyHudCount: 1,
             hud.NextTopOffset));
     }
+
+    private static ArenaActorMarker CreatePlayerMarker(
+        int stableActorId,
+        ArenaPoint position) =>
+        new(
+            new ActorRecord
+            {
+                StableActorId = stableActorId,
+                Name = $"Player {stableActorId}",
+                ObjectKind = "Pc",
+                EntityId = (uint)stableActorId,
+                GameObjectId = (ulong)stableActorId,
+                OwnerId = 0,
+                BaseId = 0,
+                ClassJobId = 21,
+                Level = 100,
+            },
+            ArenaActorMarkerKind.Player,
+            position,
+            new ArenaVector(0, 1),
+            100,
+            0,
+            100,
+            1,
+            100,
+            100,
+            false,
+            true,
+            false);
 }

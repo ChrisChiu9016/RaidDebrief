@@ -242,6 +242,7 @@ internal sealed unsafe class ActionEffectReader : IDisposable
             header->ActionId,
             header->ActionType,
             sourceObjectId,
+            casterEntityId,
             header->AnimationTargetId.Id == 0 ? null : header->AnimationTargetId.Id,
             targets);
     }

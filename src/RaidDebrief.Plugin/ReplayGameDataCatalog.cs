@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Dalamud.Game;
 using Dalamud.Plugin.Services;
 using ActionSheet = Lumina.Excel.Sheets.Action;
+using ActionCategorySheet = Lumina.Excel.Sheets.ActionCategory;
 using StatusSheet = Lumina.Excel.Sheets.Status;
 using Lumina.Excel;
 using RaidDebrief.Core;
@@ -11,9 +12,12 @@ namespace RaidDebrief.Plugin;
 
 internal sealed class ReplayGameDataCatalog
 {
+    private const uint AutoAttackActionCategoryId = 1;
 
     private readonly ExcelSheet<ActionSheet> actionSheet;
     private readonly ExcelSheet<ActionSheet> englishActionSheet;
+    private readonly string? localizedAutoAttackName;
+    private readonly string? englishAutoAttackName;
     private readonly Dictionary<uint, string> actionNames = new();
     private readonly Dictionary<uint, string> recordedActionNames = new();
     private readonly Dictionary<uint, string> statusNames = new();
@@ -26,15 +30,22 @@ internal sealed class ReplayGameDataCatalog
         ArgumentNullException.ThrowIfNull(dataManager);
         this.actionSheet = dataManager.GetExcelSheet<ActionSheet>();
         this.englishActionSheet = dataManager.GetExcelSheet<ActionSheet>(ClientLanguage.English);
+        this.localizedAutoAttackName = ReadAutoAttackName(
+            dataManager.GetExcelSheet<ActionCategorySheet>());
+        this.englishAutoAttackName = ReadAutoAttackName(
+            dataManager.GetExcelSheet<ActionCategorySheet>(ClientLanguage.English));
         this.StatusEffects = new ReplayStatusEffectDatabase(
             ReadStatusDescriptions(
                 dataManager.GetExcelSheet<StatusSheet>(ClientLanguage.English)));
         foreach (var action in this.actionSheet)
         {
-            var name = action.Name.ToString();
+            var name = ResolveGameDataName(
+                action.Name.ToString(),
+                action.ActionCategory.RowId,
+                this.localizedAutoAttackName);
             if (action.RowId != 0 && IsResolvedName(name))
             {
-                this.actionNames[action.RowId] = name;
+                this.actionNames[action.RowId] = name!;
             }
         }
 
@@ -90,14 +101,20 @@ internal sealed class ReplayGameDataCatalog
         string? localizedName = null;
         if (this.actionSheet.TryGetRow(actionId, out var action))
         {
-            localizedName = action.Name.ToString();
+            localizedName = ResolveGameDataName(
+                action.Name.ToString(),
+                action.ActionCategory.RowId,
+                this.localizedAutoAttackName);
         }
 
         string? englishName = null;
         if (!IsResolvedName(localizedName)
             && this.englishActionSheet.TryGetRow(actionId, out var englishAction))
         {
-            englishName = englishAction.Name.ToString();
+            englishName = ResolveGameDataName(
+                englishAction.Name.ToString(),
+                englishAction.ActionCategory.RowId,
+                this.englishAutoAttackName);
         }
 
         name = ResolveActionName(actionId, localizedName, englishName);
@@ -108,6 +125,27 @@ internal sealed class ReplayGameDataCatalog
 
         return name;
     }
+
+    internal static string? ResolveGameDataName(
+        string? actionName,
+        uint actionCategoryId,
+        string? actionCategoryName)
+    {
+        if (IsResolvedName(actionName))
+        {
+            return actionName;
+        }
+
+        return actionCategoryId == AutoAttackActionCategoryId
+            && IsResolvedName(actionCategoryName)
+                ? actionCategoryName
+                : actionName;
+    }
+
+    internal static string? ReadAutoAttackName(ExcelSheet<ActionCategorySheet> actionCategories) =>
+        actionCategories.TryGetRow(AutoAttackActionCategoryId, out var autoAttackCategory)
+            ? autoAttackCategory.Name.ToString()
+            : null;
 
     internal static string ResolveActionName(
         uint actionId,

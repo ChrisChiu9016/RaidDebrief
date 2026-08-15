@@ -73,6 +73,7 @@ public static class ActionEffectDecoder
     public const byte HealType = 4;
     public const byte BlockedDamageType = 5;
     public const byte ParriedDamageType = 6;
+    public const byte SourceActorHealFlag = 0x01;
 
     public static ActionEffectKind Classify(byte rawType) => rawType switch
     {
@@ -102,4 +103,15 @@ public static class ActionEffectDecoder
 
     public static bool DecodeDirectHit(byte rawType, byte param0) =>
         Classify(rawType) == ActionEffectKind.Damage && (param0 & 0x40) != 0;
+
+    public static bool IsSourceActorHeal(byte rawType, byte param0) =>
+        rawType == HealType && (param0 & SourceActorHealFlag) != 0;
+
+    public static int? ResolveTargetStableActorId(
+        ActionEffectRecord actionEffect,
+        ActionEffectTargetRecord target,
+        ActionEffectEntryRecord entry) =>
+        IsSourceActorHeal(entry.RawType, entry.Param0)
+            ? actionEffect.SourceStableActorId
+            : target.TargetStableActorId;
 }

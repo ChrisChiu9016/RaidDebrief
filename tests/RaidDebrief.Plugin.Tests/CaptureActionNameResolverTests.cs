@@ -21,6 +21,25 @@ public sealed class CaptureActionNameResolverTests
         Assert.Equal(ActionNameSource.StaticExcel, actionName.Source);
     }
 
+    [Theory]
+    [InlineData("", 1u, "Auto-attack", "Auto-attack")]
+    [InlineData("_rsv_34423_-1_1_0_0", 1u, "オートアタック", "オートアタック")]
+    [InlineData("Named Action", 1u, "Auto-attack", "Named Action")]
+    [InlineData("", 2u, "Spell", "")]
+    public void AutoAttackCategoryNamesOnlyUnnamedAutoAttacks(
+        string actionName,
+        uint actionCategoryId,
+        string actionCategoryName,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            ReplayGameDataCatalog.ResolveGameDataName(
+                actionName,
+                actionCategoryId,
+                actionCategoryName));
+    }
+
     [Fact]
     public void NewlyResolvedLuminaNameIsRecordedAsRuntimeRsv()
     {

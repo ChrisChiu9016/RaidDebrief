@@ -23,6 +23,36 @@ public sealed class ActionEffectRecordTests
     }
 
     [Fact]
+    public void DecoderRedirectsSourceActorHealsFromPacketTargetToCaster()
+    {
+        var actionEffect = CreateRecord().ActionEffects[0];
+        var packetTarget = actionEffect.Targets[1];
+        var sourceActorHeal = packetTarget.Entries[0] with
+        {
+            Param0 = ActionEffectDecoder.SourceActorHealFlag,
+        };
+
+        Assert.True(ActionEffectDecoder.IsSourceActorHeal(
+            sourceActorHeal.RawType,
+            sourceActorHeal.Param0));
+        Assert.Equal(
+            actionEffect.SourceStableActorId,
+            ActionEffectDecoder.ResolveTargetStableActorId(
+                actionEffect,
+                packetTarget,
+                sourceActorHeal));
+        Assert.Equal(
+            packetTarget.TargetStableActorId,
+            ActionEffectDecoder.ResolveTargetStableActorId(
+                actionEffect,
+                packetTarget,
+                packetTarget.Entries[0]));
+        Assert.False(ActionEffectDecoder.IsSourceActorHeal(
+            ActionEffectDecoder.DamageType,
+            ActionEffectDecoder.SourceActorHealFlag));
+    }
+
+    [Fact]
     public void RoundTripPreservesMultiTargetAndMultiEntryActionEffects()
     {
         var source = CreateRecord();

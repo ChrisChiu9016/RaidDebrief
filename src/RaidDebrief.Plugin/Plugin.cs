@@ -7,9 +7,23 @@ using Dalamud.Plugin.Services;
 
 namespace RaidDebrief.Plugin;
 
+internal sealed class PluginCommandRouter
+{
+    private readonly Action openReplay;
+
+    public PluginCommandRouter(Action openReplay)
+    {
+        this.openReplay = openReplay ?? throw new ArgumentNullException(nameof(openReplay));
+    }
+
+    public void Execute(string arguments) =>
+        this.openReplay();
+}
+
+
 public sealed class Plugin : IDalamudPlugin
 {
-    private static readonly string[] CommandNames = ["/rdebrief", "/rd"];
+    private static readonly string[] CommandNames = ["/rdebrief", "/rdb"];
     internal static ReadOnlySpan<string> RegisteredCommandNames => CommandNames;
 
     [PluginService]
@@ -63,6 +77,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ProbeWindow probeWindow;
     private readonly ReplayWindow replayWindow;
     private readonly DebriefSummaryWindow debriefSummaryWindow;
+    private readonly PluginCommandRouter commandRouter;
+    private readonly bool[] registeredCommands = new bool[CommandNames.Length];
 
     public Plugin()
     {
@@ -94,6 +110,11 @@ public sealed class Plugin : IDalamudPlugin
             Log,
             this.captureService,
             this.omnidirectionalityCatalog);
+        this.probeWindow = new ProbeWindow(
+            this.liveDataProbe,
+            this.captureService,
+            this.actionEffectReader,
+            this.OpenReplayUi);
         this.replayWindow = new ReplayWindow(
             this.captureService,
             TextureProvider,
@@ -101,34 +122,45 @@ public sealed class Plugin : IDalamudPlugin
             this.omnidirectionalityCatalog,
             this.configuration.ShowHotEffects,
             this.SaveShowHotEffectsSetting,
+            this.configuration.ShowPostWipeDebrief,
+            this.SavePostWipeDebriefSetting,
+            this.configuration.CloseReplayOnCombatStart,
+            this.SaveCloseReplayOnCombatStartSetting,
+            this.configuration.DeveloperModeEnabled,
+            this.SaveDeveloperModeSetting,
+            this.probeWindow.DrawEmbedded,
+            this.probeWindow.SetEmbeddedVisible,
             PluginInterface.GetPluginConfigDirectory(),
             PluginInterface.AssemblyLocation.FullName);
         this.debriefSummaryWindow =
             new DebriefSummaryWindow(this.OpenDebriefReplay, TextureProvider);
-        this.probeWindow = new ProbeWindow(
-            this.liveDataProbe,
-            this.captureService,
-            this.actionEffectReader,
-            this.OpenReplayUi,
-            this.configuration.ShowPostWipeDebrief,
-            this.SavePostWipeDebriefSetting,
-            this.configuration.CloseReplayOnCombatStart,
-            this.SaveCloseReplayOnCombatStartSetting);
-        this.windowSystem.AddWindow(this.probeWindow);
+        this.commandRouter = new PluginCommandRouter(this.OpenReplayUi);
         this.windowSystem.AddWindow(this.replayWindow);
         this.windowSystem.AddWindow(this.debriefSummaryWindow);
 
-        foreach (var commandName in CommandNames)
+        for (var index = 0; index < CommandNames.Length; index++)
         {
-            CommandManager.AddHandler(commandName, new CommandInfo(this.OnCommand)
+            var commandName = CommandNames[index];
+            var registered = CommandManager.AddHandler(commandName, new CommandInfo(this.OnCommand)
             {
-                HelpMessage = "開啟 Capture 視窗；使用 /rdebrief replay 或 /rd replay 開啟上一個 Pull 的 Replay。",
+                HelpMessage = "開啟 Replay 主畫面並切回 Replay 分頁。",
             });
+            this.registeredCommands[index] = registered;
+            if (registered)
+            {
+                Log.Information("Raid Debrief registered command {CommandName}.", commandName);
+            }
+            else
+            {
+                Log.Warning(
+                    "Raid Debrief could not register command {CommandName}; another handler may already own it.",
+                    commandName);
+            }
         }
 
         PluginInterface.UiBuilder.Draw += this.DrawUi;
-        PluginInterface.UiBuilder.OpenMainUi += this.ToggleMainUi;
-        PluginInterface.UiBuilder.OpenConfigUi += this.ToggleMainUi;
+        PluginInterface.UiBuilder.OpenMainUi += this.OpenReplayUi;
+        PluginInterface.UiBuilder.OpenConfigUi += this.OpenReplayUi;
 
         Log.Information("Raid Debrief in-game Replay and Debrief windows loaded.");
     }
@@ -136,11 +168,14 @@ public sealed class Plugin : IDalamudPlugin
     public void Dispose()
     {
         PluginInterface.UiBuilder.Draw -= this.DrawUi;
-        PluginInterface.UiBuilder.OpenMainUi -= this.ToggleMainUi;
-        PluginInterface.UiBuilder.OpenConfigUi -= this.ToggleMainUi;
-        foreach (var commandName in CommandNames)
+        PluginInterface.UiBuilder.OpenMainUi -= this.OpenReplayUi;
+        PluginInterface.UiBuilder.OpenConfigUi -= this.OpenReplayUi;
+        for (var index = 0; index < CommandNames.Length; index++)
         {
-            CommandManager.RemoveHandler(commandName);
+            if (this.registeredCommands[index])
+            {
+                CommandManager.RemoveHandler(CommandNames[index]);
+            }
         }
 
         this.windowSystem.RemoveAllWindows();
@@ -174,6 +209,12 @@ public sealed class Plugin : IDalamudPlugin
         this.configuration.ShowHotEffects = enabled;
         PluginInterface.SavePluginConfig(this.configuration);
     }
+
+    private void SaveDeveloperModeSetting(bool enabled)
+    {
+        this.configuration.DeveloperModeEnabled = enabled;
+        PluginInterface.SavePluginConfig(this.configuration);
+    }
     private void DrawUi()
     {
         var inCombat = this.liveDataProbe.InCombat;
@@ -188,18 +229,8 @@ public sealed class Plugin : IDalamudPlugin
     }
 
 
-    private void OnCommand(string command, string arguments)
-    {
-        if (string.Equals(arguments.Trim(), "replay", StringComparison.OrdinalIgnoreCase))
-        {
-            this.OpenReplayUi();
-            return;
-        }
-
-        this.ToggleMainUi();
-    }
-
-    private void ToggleMainUi() => this.probeWindow.Toggle();
+    private void OnCommand(string command, string arguments) =>
+        this.commandRouter.Execute(arguments);
 
     private void OpenReplayUi() =>
         this.replayWindow.OpenRuntime(this.liveDataProbe.InCombat);

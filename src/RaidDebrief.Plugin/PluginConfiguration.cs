@@ -16,5 +16,7 @@ internal sealed class PluginConfiguration : IPluginConfiguration
 
     public bool CloseReplayOnCombatStart { get; set; } = true;
 
+    public bool DeveloperModeEnabled { get; set; }
+
     public bool ShowHotEffects { get; set; }
 }

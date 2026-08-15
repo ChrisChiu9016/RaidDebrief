@@ -100,17 +100,22 @@ MVP success condition:
 > After a wipe, the player can identify the first death and open a useful replay window within a few seconds.
 
 ## Phase 5 — Replay UX
-Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Current-build manual Replay checks also passed for DRK and GNB invulnerability statuses and, on Runtime Pull `0619f062-21aa-44d7-aa6d-f9727f614059`, playback controls, Actor／Focus, Boss HP／Cast, Death Timeline／Quick Jump, and The Blackest Night Barrier／Status presentation. Representative current-build raw Barrier／Action-name／Actor／sampling output passed on manual Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d`. Other status families and full visual-surface acceptance remain required.
+Status: Whole-interface redesign and Capture-side Action-name／barrier support are implemented. Automated tests, all repository recorded fixtures, deterministic seek limits, x64 Debug build, configured-path verification, post-build hot reload, one 13.9-minute current-build `DutyWiped` Pull finalization, and exact Runtime reload of that CaptureId passed on 2026-08-14. Current-build manual Replay checks also passed for DRK and GNB invulnerability statuses and, on Runtime Pull `0619f062-21aa-44d7-aa6d-f9727f614059`, playback controls, Actor／Focus, Boss HP／Cast, Death Timeline／Quick Jump, and The Blackest Night Barrier／Status presentation. Representative current-build raw Barrier／Actor／sampling output passed on manual Capture `1661a50a-7961-4b95-a0c7-c9aca5e85c2d`. Manual Capture `0a7120bb-5d4d-4887-ae30-0501ead6209f` additionally verified that a non-cast Boss auto-attack Action Effect produces the localized Pull-local `ActionName`; Replay displayed the same fallback name in Last Hits and as the killing blow for legacy data. Fresh automatic Runtime Pull `b5324338-aa3d-4b0c-afc3-2db427da2fcf` then passed the complete current-build Automatic Capture → in-memory Runtime Replay → ordinary-attack presentation path. A hot-reloaded multi-enemy regression fixture displayed all three concurrent targetable-enemy Feint entries with their retained target names, accepting multi-Boss damage-down presentation. Other status families and full visual-surface acceptance remain required.
 
 Implemented:
 - Fixed three-column hierarchy: compact Pull／Party, Boss＋Arena, and Actor／Death context
 - Boss HP and recorded CurrentCastTime／TotalCastTime playback
 - Job-only Party and Arena labels with selected-player focus and zoomed camera follow
 - Bottom-only playback controls, speed, one Death-only Timeline, marker hover, and complete Quick Jump
-- Timestamp HP／alive snapshot with the Party-style Job icon, HP values, percentage, and health／barrier bars; a compact native-icon grid shows recorded remaining time and stack counts for selected-player defensive buffs, barriers, and recovery support plus main-Boss Reprisal／Feint／Addle／Dismantle damage-down debuffs
+- Timestamp HP／alive snapshot with the Party-style Job icon, HP values, percentage, and health／barrier bars; a compact native-icon grid shows recorded remaining time and stack counts for selected-player defensive buffs, barriers, and recovery support plus Reprisal／Feint／Addle／Dismantle damage-down debuffs from every currently targetable enemy, retaining the target Actor and naming it on hover
 - Honest Death event correlation with virtual HP, Last Hits, estimated Overkill, confidence, evidence, and limitations
 - Recorded party membership plus legacy player-Actor fallback
 - Runtime and manual JSON source controls collapsed under an advanced development section
+- Fixed side columns whose cards never resize with the window, a derived minimum window height that fits the complete Death context without a side-panel scrollbar, and an explicit label／body／metric type hierarchy over UI-scaled framed boxes
+- Health-change rows for the inclusive ten-second interval before the playhead, with a separate always-available “詳細記錄” window that keeps a ten-row viewport and closes only through its own control
+- Death-context status rows anchored at the killing blow's recorded Action Effect timestamp rather than at the Death transition, so death-stripped mitigation stays observable while a death-caused removal never becomes a derived countdown
+
+Pending in-game acceptance for this phase: the fixed-column layout and derived minimum height at 100%／150%／200% UI scale, and one recorded death that carries mitigation into the killing blow to confirm the anchor against the recorded sampling lag.
 
 Deliberately absent from the formal surface:
 - Cast, status, raise, Wipe, damage, or heal event jump

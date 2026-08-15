@@ -77,20 +77,20 @@ Phase 4 presents recorded observations only. Pull duration is the latest recorde
 Replay is the main product.
 
 Required:
-- Three-column Replay layout with compact Pull／Party context, dominant Arena, and Death context
+- Three-column Replay layout with compact Pull／Party context, dominant Arena, and Actor／Death context; both side columns hold one fixed width so their cards never resize with the window, the Arena absorbs every additional pixel, and the enforced minimum height keeps the complete Death context readable without a side-panel scrollbar
 - Boss name, HP, and recorded cast progress above the Arena
-- 2D arena view with Player／Boss positions, facing, dead state, Waymarks, and selected-Actor focus
+- Responsive square 2D arena view with Player／Boss positions, facing, dead state, Waymarks, selected／hovered Actor priority, collision-suppressed labels, and compact Boss HUD treatment at small canvas sizes
 - Bottom-only playback controls, speed, single Timeline, scrubbing, and player-death markers
 - Complete player-death quick-jump list with direct paused seek
 - Timestamp Party and selected-player HP／alive／barrier state plus recorded active mitigation and recovery support
 - Confidence-labelled immediate Death correlation built from recorded HP and Action Effects
 
-The formal Replay surface exposes only recorded player deaths for Timeline navigation. Selecting a death focuses the Actor, seeks exactly to the recorded Death timestamp, pauses playback, and opens its context. Cast and status events reconstruct the state at the selected timestamp but are not separate navigation markers. Correlated Killing Blow／HP-before-hit／Overkill values are derived interpretations, never server-authored fields: the model preserves confidence, evidence, limitations, and an algorithm version, while the UI labels estimated values and never infers responsibility, mechanic cause, or recommended action. Runtime／JSON source diagnostics remain collapsed under the advanced development section.
+The formal Replay surface exposes only recorded player deaths for Timeline navigation. Selecting a death focuses the Actor, seeks exactly to the recorded Death timestamp, pauses playback, and opens its context. Cast and status events reconstruct the state at the selected timestamp but are not separate navigation markers, with one recorded exception: because FFXIV strips every status on death, the Death context reconstructs its status rows at the killing blow's recorded Action Effect timestamp and ignores the status removals the Death transition itself caused. That remains an observation of the last recorded status sample, never a claim that the mitigation was or was not sufficient. Correlated Killing Blow／HP-before-hit／Overkill values are derived interpretations, never server-authored fields: the model preserves confidence, evidence, limitations, and an algorithm version, while the UI labels estimated values and never infers responsibility, mechanic cause, or recommended action. Runtime／JSON source diagnostics remain collapsed under the advanced development section.
 
 Current Captures preserve barrier percentage and one reliable Pull-local Action-name snapshot per observed Action ID. Replay must prefer that recorded name over current-session localization and must never expose unresolved RSV placeholders as names. Status presentation is reconstructed from recorded transitions: player defensive／barrier／invulnerability effects are objective observations, healing-over-time display is optional and disabled by default, and Boss effects are limited to recorded damage-down debuffs. These rows are descriptive state, not mitigation scoring or cause attribution.
 
 ### 4.4 Death Jump
-Users can jump directly to every recorded player `Death`, including repeated deaths after a raise. The single Timeline and Quick Jump row contain player deaths only; raises, casts, status changes, Wipe, damage, and heal events are not navigation markers.
+Users can jump directly to every recorded player `Death`, including repeated deaths after a raise. The single Timeline and Quick Jump surface contain player deaths only; raises, casts, status changes, Wipe, damage, and heal events are not navigation markers. Quick Jump never infers MT／D1-style positions. A single death is a compact Job-icon／abbreviation／timestamp chip and seeks directly. Deaths no more than five seconds from the first death in a group collapse into one chronological cluster chip with a death icon, derived title, timestamp range, and count badge; activating it opens the exact Job／timestamp choices. All chips share one height while width follows their content. A group of exactly eight deaths uses the presentation label `WIPED`; this label derives from the death count and is not a recorded `DutyWiped` event.
 
 ## 5. Event Chain
 ### Core behavior

@@ -133,7 +133,7 @@ public sealed class DeathEventCorrelator
     private const long DefaultHpObservationLagMilliseconds = 1_000;
     private const long MaximumCalibrationLagMilliseconds = 2_000;
     private const int MinimumCalibrationSamples = 3;
-    private const int MaximumLastHits = 6;
+    private const int MaximumLastHits = 5;
 
     public DeathEventCorrelation[] Analyze(PullRecord record)
     {
@@ -197,13 +197,16 @@ public sealed class DeathEventCorrelator
             for (var targetIndex = 0; targetIndex < actionEffect.Targets.Length; targetIndex++)
             {
                 var target = actionEffect.Targets[targetIndex];
-                if (target.TargetStableActorId != actorId)
-                {
-                    continue;
-                }
 
                 foreach (var entry in target.Entries)
                 {
+                    if (ActionEffectDecoder.ResolveTargetStableActorId(
+                            actionEffect,
+                            target,
+                            entry) != actorId)
+                    {
+                        continue;
+                    }
                     if (entry.Amount is not { } amount || amount == 0)
                     {
                         continue;
@@ -627,13 +630,16 @@ public sealed class DeathEventCorrelator
             for (var targetIndex = 0; targetIndex < actionEffect.Targets.Length; targetIndex++)
             {
                 var target = actionEffect.Targets[targetIndex];
-                if (target.TargetStableActorId != actorId)
-                {
-                    continue;
-                }
 
                 foreach (var entry in target.Entries)
                 {
+                    if (ActionEffectDecoder.ResolveTargetStableActorId(
+                            actionEffect,
+                            target,
+                            entry) != actorId)
+                    {
+                        continue;
+                    }
                     if (entry.Amount is not { } amount
                         || entry.Kind is not (ActionEffectKind.Damage or ActionEffectKind.Heal))
                     {

@@ -6,6 +6,7 @@ using Lumina.Excel;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using RaidDebrief.Core;
 using ActionSheet = Lumina.Excel.Sheets.Action;
+using ActionCategorySheet = Lumina.Excel.Sheets.ActionCategory;
 
 namespace RaidDebrief.Plugin;
 
@@ -16,6 +17,7 @@ internal sealed class CaptureActionNameResolver
     private readonly EnemyCastBarNameReader enemyCastBarNameReader;
     private readonly IPluginLog log;
     private readonly string language;
+    private readonly string? autoAttackName;
     private readonly HashSet<uint> failedActionIds = new();
 
     public CaptureActionNameResolver(
@@ -28,12 +30,18 @@ internal sealed class CaptureActionNameResolver
         ArgumentNullException.ThrowIfNull(log);
 
         this.actionSheet = dataManager.GetExcelSheet<ActionSheet>();
+        this.autoAttackName = ReplayGameDataCatalog.ReadAutoAttackName(
+            dataManager.GetExcelSheet<ActionCategorySheet>());
         this.enemyCastBarNameReader = new EnemyCastBarNameReader(gameGui);
         this.log = log;
         this.language = dataManager.Language.ToString();
         foreach (var action in this.actionSheet)
         {
-            if (action.RowId != 0 && ReplayGameDataCatalog.IsResolvedName(action.Name.ToString()))
+            var gameDataName = ReplayGameDataCatalog.ResolveGameDataName(
+                action.Name.ToString(),
+                action.ActionCategory.RowId,
+                this.autoAttackName);
+            if (action.RowId != 0 && ReplayGameDataCatalog.IsResolvedName(gameDataName))
             {
                 this.initiallyResolvedActionIds.Add(action.RowId);
             }
@@ -52,7 +60,10 @@ internal sealed class CaptureActionNameResolver
             string? gameDataName = null;
             if (this.actionSheet.TryGetRow(actionId, out var action))
             {
-                gameDataName = action.Name.ToString();
+                gameDataName = ReplayGameDataCatalog.ResolveGameDataName(
+                    action.Name.ToString(),
+                    action.ActionCategory.RowId,
+                    this.autoAttackName);
             }
             string? clientRsvName = null;
             string? uiObservedName = null;
@@ -109,6 +120,7 @@ internal sealed class CaptureActionNameResolver
         var name = resolved.ToString();
         return ReplayGameDataCatalog.IsResolvedName(name) ? name : null;
     }
+
 
 
     internal static RecordedActionName? Resolve(

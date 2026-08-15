@@ -512,6 +512,7 @@ internal sealed class CaptureService : IDisposable
         uint actionId,
         byte actionType,
         ulong sourceObjectId,
+        uint sourceEntityId,
         ulong? animationTargetObjectId,
         ActionEffectTargetRecord[] targets)
     {
@@ -527,6 +528,7 @@ internal sealed class CaptureService : IDisposable
                 actionId,
                 actionType,
                 sourceObjectId,
+                sourceEntityId,
                 animationTargetObjectId,
                 targets);
             this.actionEffectCount = this.activeCapture.ActionEffects.Count;
@@ -1008,6 +1010,8 @@ internal sealed class CaptureService : IDisposable
         private readonly Dictionary<uint, RecordedActionName> actionNames = new();
         private readonly Dictionary<uint, ActionNameRetryState> actionNameRetries = new();
         private readonly Func<uint, uint, RecordedActionName?> resolveActionName;
+        private readonly List<uint> pendingActionNameIds = new();
+        private readonly Dictionary<uint, uint> pendingActionNameSources = new();
         private readonly WaymarkTimelineBuilder waymarkTimeline = new();
         private readonly WaymarkObservation[] waymarkObservations = new WaymarkObservation[WaymarkReader.MarkerCount];
         private readonly TargetMarkerTimelineBuilder targetMarkerTimeline = new();
@@ -1092,6 +1096,7 @@ internal sealed class CaptureService : IDisposable
 
             this.samplingScheduler.Commit(preparation);
             var timestampMilliseconds = preparation.TimestampMilliseconds;
+            this.ResolvePendingActionNames(timestampMilliseconds);
 
             if (this.observations.Length < actors.Length)
             {
@@ -1233,6 +1238,7 @@ internal sealed class CaptureService : IDisposable
             uint actionId,
             byte actionType,
             ulong sourceObjectId,
+            uint sourceEntityId,
             ulong? animationTargetObjectId,
             ActionEffectTargetRecord[] targets)
         {
@@ -1248,6 +1254,7 @@ internal sealed class CaptureService : IDisposable
                 Targets = targets,
             };
             this.ResolveTargetActorIds(targets);
+            this.QueueActionNameResolution(actionId, sourceEntityId);
             this.ActionEffects.Add(actionEffect);
             return actionEffect;
         }
@@ -1327,21 +1334,70 @@ internal sealed class CaptureService : IDisposable
                 TargetMarkerFrames = this.targetMarkerTimeline.ToArray(),
             };
         }
-        private void TryCaptureActionName(
+        private void QueueActionNameResolution(uint actionId, uint sourceEntityId)
+        {
+            if (actionId == 0 || this.actionNames.ContainsKey(actionId))
+            {
+                return;
+            }
+
+            if (this.actionNameRetries.TryGetValue(actionId, out var retry)
+                && retry.AttemptCount >= MaximumActionNameResolutionAttempts)
+            {
+                return;
+            }
+
+            if (this.pendingActionNameSources.TryAdd(actionId, sourceEntityId))
+            {
+                this.pendingActionNameIds.Add(actionId);
+                return;
+            }
+
+            if (sourceEntityId != 0 && this.pendingActionNameSources[actionId] == 0)
+            {
+                this.pendingActionNameSources[actionId] = sourceEntityId;
+            }
+        }
+
+        private void ResolvePendingActionNames(long timestampMilliseconds)
+        {
+            for (var index = this.pendingActionNameIds.Count - 1; index >= 0; index--)
+            {
+                var actionId = this.pendingActionNameIds[index];
+                var sourceEntityId = this.pendingActionNameSources[actionId];
+                if (!this.TryCaptureActionName(actionId, sourceEntityId, timestampMilliseconds))
+                {
+                    continue;
+                }
+
+                this.pendingActionNameSources.Remove(actionId);
+                var lastIndex = this.pendingActionNameIds.Count - 1;
+                this.pendingActionNameIds[index] = this.pendingActionNameIds[lastIndex];
+                this.pendingActionNameIds.RemoveAt(lastIndex);
+            }
+        }
+
+        private bool TryCaptureActionName(
             uint actionId,
             uint sourceEntityId,
             long timestampMilliseconds)
         {
             if (this.actionNames.ContainsKey(actionId))
             {
-                return;
+                return true;
             }
 
-            if (this.actionNameRetries.TryGetValue(actionId, out var retry)
-                && (retry.AttemptCount >= MaximumActionNameResolutionAttempts
-                    || timestampMilliseconds < retry.NextAttemptTimestampMilliseconds))
+            if (this.actionNameRetries.TryGetValue(actionId, out var retry))
             {
-                return;
+                if (retry.AttemptCount >= MaximumActionNameResolutionAttempts)
+                {
+                    return true;
+                }
+
+                if (timestampMilliseconds < retry.NextAttemptTimestampMilliseconds)
+                {
+                    return false;
+                }
             }
 
             var resolved = this.resolveActionName(actionId, sourceEntityId);
@@ -1354,12 +1410,14 @@ internal sealed class CaptureService : IDisposable
             {
                 this.actionNames.Add(actionId, actionName);
                 this.actionNameRetries.Remove(actionId);
-                return;
+                return true;
             }
 
-            this.actionNameRetries[actionId] = new ActionNameRetryState(
+            var nextRetry = new ActionNameRetryState(
                 retry.AttemptCount + 1,
                 timestampMilliseconds + ActionNameRetryIntervalMilliseconds);
+            this.actionNameRetries[actionId] = nextRetry;
+            return nextRetry.AttemptCount >= MaximumActionNameResolutionAttempts;
         }
 
         private readonly record struct ActionNameRetryState(

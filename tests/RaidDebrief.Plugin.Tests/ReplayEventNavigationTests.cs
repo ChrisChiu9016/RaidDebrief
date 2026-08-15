@@ -209,7 +209,7 @@ public sealed class ReplayEventNavigationTests
         Assert.Equal(3, remaining);
     }
     [Fact]
-    public void ActiveMitigationIncludesPlayerBuffsAndBossDamageDownDebuffs()
+    public void ActiveMitigationIncludesPlayerBuffsAndEnemyDamageDownDebuffs()
     {
         var statusEffects = new ReplayStatusEffectDatabase(
         [
@@ -259,7 +259,12 @@ public sealed class ReplayEventNavigationTests
         var count = ReplayWindow.CollectActiveMitigations(
             replay.Timeline.Events,
             playerActorId: 1,
-            bossActorId: 10,
+            actors:
+            [
+                CreateMarker(
+                    CreateActor(10, "Boss", "BattleNpc", 1_000),
+                    ArenaActorMarkerKind.BattleNpc),
+            ],
             timestampMilliseconds: 4_000,
             statusEffects,
             showHealingOverTime: false,
@@ -267,13 +272,13 @@ public sealed class ReplayEventNavigationTests
 
         Assert.Equal(3, count);
         Assert.Equal(
-            new ActiveMitigationStatus(1191, 0, MitigationTargetKind.Player),
+            new ActiveMitigationStatus(1191, 0, MitigationTargetKind.Player, 1),
             active[0]);
         Assert.Equal(
-            new ActiveMitigationStatus(860, 4, MitigationTargetKind.Boss),
+            new ActiveMitigationStatus(860, 4, MitigationTargetKind.Enemy, 10),
             active[1]);
         Assert.Equal(
-            new ActiveMitigationStatus(1195, 3, MitigationTargetKind.Boss),
+            new ActiveMitigationStatus(1195, 3, MitigationTargetKind.Enemy, 10),
             active[2]);
 
         Assert.Equal(
@@ -281,11 +286,162 @@ public sealed class ReplayEventNavigationTests
             ReplayWindow.CollectActiveMitigations(
                 replay.Timeline.Events,
                 playerActorId: 1,
-                bossActorId: null,
+                actors: [],
                 timestampMilliseconds: 4_000,
                 statusEffects,
                 showHealingOverTime: false,
                 active));
+    }
+
+    [Fact]
+    public void DeathStrippedStatusesStayVisibleThroughTheRecordedIndexLimit()
+    {
+        // Capture appends Death before the status removals it causes, and both
+        // carry the same sample timestamp, so only the recorded index separates
+        // "expired on its own" from "removed because the actor died".
+        var statusEffects = new ReplayStatusEffectDatabase(
+        [
+            new(1191, "Damage taken is reduced."),
+            new(1193, "Damage taken is reduced."),
+        ]);
+        var replay = new ReplaySession(CreateRecord() with
+        {
+            Events =
+            [
+                CreateEvent(
+                    1_000,
+                    ObservedEventType.StatusGained,
+                    1,
+                    statusId: 1191) with { RelatedObjectId = 101, StatusRemainingTime = 20 },
+                CreateEvent(
+                    1_500,
+                    ObservedEventType.StatusGained,
+                    1,
+                    statusId: 1193) with { RelatedObjectId = 101, StatusRemainingTime = 15 },
+                CreateEvent(3_000, ObservedEventType.Death, 1),
+                CreateEvent(
+                    3_000,
+                    ObservedEventType.StatusLost,
+                    1,
+                    statusId: 1191) with { RelatedObjectId = 101 },
+                CreateEvent(
+                    3_000,
+                    ObservedEventType.StatusLost,
+                    1,
+                    statusId: 1193) with { RelatedObjectId = 101 },
+            ],
+        });
+        Span<ActiveMitigationStatus> active = stackalloc ActiveMitigationStatus[8];
+
+        // Without the limit the death sample reads as "everything already expired".
+        Assert.Equal(
+            0,
+            ReplayWindow.CollectActiveMitigations(
+                replay.Timeline.Events,
+                playerActorId: 1,
+                actors: [],
+                timestampMilliseconds: 3_000,
+                statusEffects,
+                showHealingOverTime: false,
+                active));
+
+        var count = ReplayWindow.CollectActiveMitigations(
+            replay.Timeline.Events,
+            playerActorId: 1,
+            actors: [],
+            timestampMilliseconds: 3_000,
+            statusEffects,
+            showHealingOverTime: false,
+            active,
+            exclusiveRecordedIndexLimit: 2);
+
+        Assert.Equal(2, count);
+        Assert.Equal(
+            [1193u, 1191u],
+            active[..count].ToArray().Select(status => status.StatusId));
+
+        // The recorded remaining time still counts down from its own anchor.
+        Assert.True(ReplayWindow.TryResolveStatusRemainingSeconds(
+            replay.Timeline.Events,
+            0,
+            3_000,
+            out var remaining,
+            exclusiveRecordedIndexLimit: 2));
+        Assert.Equal(18, remaining);
+    }
+
+    [Fact]
+    public void DeathStrippedLossNeverBecomesALegacyCountdown()
+    {
+        // A legacy capture has no recorded remaining time, so the helper would
+        // otherwise derive every countdown from the death-stripped loss and render
+        // a uniform near-zero duration that the recording never observed.
+        var replay = new ReplaySession(CreateRecord() with
+        {
+            Events =
+            [
+                CreateEvent(
+                    1_000,
+                    ObservedEventType.StatusGained,
+                    1,
+                    statusId: 1191) with { RelatedObjectId = 101 },
+                CreateEvent(3_000, ObservedEventType.Death, 1),
+                CreateEvent(
+                    3_000,
+                    ObservedEventType.StatusLost,
+                    1,
+                    statusId: 1191) with { RelatedObjectId = 101 },
+            ],
+        });
+
+        Assert.False(ReplayWindow.TryResolveStatusRemainingSeconds(
+            replay.Timeline.Events,
+            0,
+            2_900,
+            out var suppressed,
+            exclusiveRecordedIndexLimit: 1));
+        Assert.Equal(0, suppressed);
+
+        // Outside the Death context the observed loss remains a valid duration.
+        Assert.True(ReplayWindow.TryResolveStatusRemainingSeconds(
+            replay.Timeline.Events,
+            0,
+            2_900,
+            out var derived));
+        Assert.Equal(0.1f, derived, 3);
+    }
+
+    [Fact]
+    public void DeathMitigationAnchorPrefersTheKillingBlowPacketTimestamp()
+    {
+        var correlation = new DeathEventCorrelation
+        {
+            DeathOriginalRecordedIndex = 7,
+            DeadActorStableId = 1,
+            DeathTimestampMilliseconds = 10_000,
+            KillingBlowCandidate = new CorrelatedDamageEvent(
+                9_300,
+                5,
+                1234,
+                2,
+                0,
+                1,
+                200_000),
+            LastHits = [],
+            Confidence = CorrelationConfidence.High,
+            Evidence = DeathCorrelationEvidence.None,
+            Limitations = DeathCorrelationLimitations.None,
+        };
+
+        // The Action Effect timestamp is stamped in the client hook, so it precedes
+        // the polled Death transition by the recorded sampling lag.
+        Assert.Equal(
+            9_300,
+            ReplayWindow.ResolveDeathMitigationAnchorTimestamp(correlation));
+        Assert.Equal(
+            10_000,
+            ReplayWindow.ResolveDeathMitigationAnchorTimestamp(
+                correlation with { KillingBlowCandidate = null }));
     }
 
     [Fact]
@@ -339,7 +495,12 @@ public sealed class ReplayEventNavigationTests
         var count = ReplayWindow.CollectActiveMitigations(
             replay.Timeline.Events,
             playerActorId: 1,
-            bossActorId: 10,
+            actors:
+            [
+                CreateMarker(
+                    CreateActor(10, "Boss", "BattleNpc", 1_000),
+                    ArenaActorMarkerKind.BattleNpc),
+            ],
             timestampMilliseconds: 3_000,
             statusEffects,
             showHealingOverTime: false,
@@ -351,7 +512,7 @@ public sealed class ReplayEventNavigationTests
     }
 
     [Fact]
-    public void PhaseTransitionBossDebuffsFollowCurrentTargetableBoss()
+    public void ActiveMitigationCollectsEveryTargetableEnemyAndSkipsUntargetable()
     {
         var recordedEndBoss = CreateActor(68, "Kefka", "BattleNpc", 6_800);
         var activePhaseBoss = CreateActor(48, "Kefka", "BattleNpc", 4_800);
@@ -373,9 +534,6 @@ public sealed class ReplayEventNavigationTests
                 MaxHp = 429_326,
             },
         ];
-        var activeBossActorId = ReplayWindow.ResolveActiveBossActorId(
-            actors,
-            recordedEndBoss);
         var statusEffects = new ReplayStatusEffectDatabase(
         [
             new(1193, "Damage dealt is reduced."),
@@ -399,25 +557,32 @@ public sealed class ReplayEventNavigationTests
                 CreateEvent(
                     66_901,
                     ObservedEventType.StatusGained,
-                    48,
+                    52,
                     statusId: 1195) with { RelatedObjectId = 269_057_521 },
+                CreateEvent(
+                    66_950,
+                    ObservedEventType.StatusGained,
+                    68,
+                    statusId: 1193) with { RelatedObjectId = 268_877_883 },
             ],
         });
         Span<ActiveMitigationStatus> active = stackalloc ActiveMitigationStatus[8];
 
-        Assert.Equal(48, activeBossActorId);
         var count = ReplayWindow.CollectActiveMitigations(
             replay.Timeline.Events,
             playerActorId: 1,
-            activeBossActorId,
+            actors,
             timestampMilliseconds: 70_000,
             statusEffects,
             showHealingOverTime: false,
             active);
 
         Assert.Equal(
-            [1195u, 1203u, 1193u],
+            [1203u, 1193u, 1195u],
             active[..count].ToArray().Select(status => status.StatusId));
+        Assert.Equal(
+            [48, 48, 52],
+            active[..count].ToArray().Select(status => status.TargetActorId));
     }
 
     [Fact]
@@ -482,7 +647,7 @@ public sealed class ReplayEventNavigationTests
         var mitigationCount = ReplayWindow.CollectActiveMitigations(
             replay.Timeline.Events,
             playerActorId: 1,
-            bossActorId: null,
+            actors: [],
             timestampMilliseconds: 4_000,
             statusEffects,
             showHealingOverTime: false,
@@ -495,7 +660,7 @@ public sealed class ReplayEventNavigationTests
         var countWithHot = ReplayWindow.CollectActiveMitigations(
             replay.Timeline.Events,
             playerActorId: 1,
-            bossActorId: null,
+            actors: [],
             timestampMilliseconds: 4_000,
             statusEffects,
             showHealingOverTime: true,
@@ -509,9 +674,23 @@ public sealed class ReplayEventNavigationTests
             (ushort)4,
             replay.Timeline.Events[active[0].ActiveEventIndex]
                 .ObservedEvent.StatusParam);
-        Assert.Equal(7, ReplayWindow.ResolveMitigationGridColumnCount(302));
+        Assert.Equal(7, ReplayWindow.ResolveMitigationGridColumnCount(302, 1));
+        Assert.Equal(3, ReplayWindow.ResolveMitigationGridColumnCount(302, 2));
     }
 
+
+    [Fact]
+    public void MitigationGridFrameGrowsWithItsTileRows()
+    {
+        // 49px tile, 4px row spacing, 8px child padding: one row matches the framed
+        // empty state so the section keeps a stable container height.
+        Assert.Equal(0, ReplayWindow.ResolveMitigationGridHeight(0, 7, 49, 4, 8));
+        Assert.Equal(65, ReplayWindow.ResolveMitigationGridHeight(1, 7, 49, 4, 8));
+        Assert.Equal(65, ReplayWindow.ResolveMitigationGridHeight(7, 7, 49, 4, 8));
+        Assert.Equal(118, ReplayWindow.ResolveMitigationGridHeight(8, 7, 49, 4, 8));
+        Assert.Equal(171, ReplayWindow.ResolveMitigationGridHeight(15, 7, 49, 4, 8));
+        Assert.Equal(171, ReplayWindow.ResolveMitigationGridHeight(3, 0, 49, 4, 8));
+    }
 
     [Fact]
     public void PartyHpAndEnemyHudPercentageUseReplayState()
@@ -655,6 +834,284 @@ public sealed class ReplayEventNavigationTests
 
         // Unfocused resolution still reports the latest death in the cluster.
         Assert.Equal(11, ReplayWindow.ResolveDeathAtTimestamp(deaths, null, 21_000, 8_000));
+    }
+
+    [Fact]
+    public void DeathQuickJumpClustersNearbyDeathsAgainstTheFirstTimestamp()
+    {
+        ReplayDeathItem[] deaths =
+        [
+            CreateDeathItem(stableActorId: 1, recordedIndex: 10, timestampMilliseconds: 10_000),
+            CreateDeathItem(stableActorId: 2, recordedIndex: 11, timestampMilliseconds: 14_000),
+            CreateDeathItem(stableActorId: 3, recordedIndex: 12, timestampMilliseconds: 15_000),
+            CreateDeathItem(stableActorId: 4, recordedIndex: 13, timestampMilliseconds: 15_001),
+            CreateDeathItem(stableActorId: 5, recordedIndex: 14, timestampMilliseconds: 19_800),
+        ];
+
+        // The five-second boundary is inclusive, and the next cluster anchors
+        // independently rather than chaining through adjacent deaths.
+        Assert.Equal(3, ReplayWindow.ResolveDeathQuickJumpClusterEnd(deaths, 0));
+        Assert.Equal(5, ReplayWindow.ResolveDeathQuickJumpClusterEnd(deaths, 3));
+    }
+
+    [Fact]
+    public void EightDeathQuickJumpClusterUsesWipedTitle()
+    {
+        Assert.Equal("2 DEATHS", ReplayWindow.FormatDeathQuickJumpClusterTitle(2));
+        Assert.Equal("WIPED", ReplayWindow.FormatDeathQuickJumpClusterTitle(8));
+    }
+
+    [Fact]
+    public void ReplayMinimumSizeFitsCompleteDeathContext()
+    {
+        Assert.Equal(1_200, ReplayWindow.ReplayWindowMinimumWidth);
+        Assert.Equal(840, ReplayWindow.ReplayWindowMinimumHeight);
+
+        // The derived minimum must exceed the historical floor, otherwise the
+        // Death context could not render without a side-panel scrollbar.
+        var minimum = ReplayWindow.ResolveReplayMinimumWindowHeight(
+            textLineHeight: 17,
+            frameHeight: 25,
+            itemSpacingY: 4,
+            windowPaddingY: 8,
+            scrollbarSize: 14,
+            uiScale: 1);
+        var scaled = ReplayWindow.ResolveReplayMinimumWindowHeight(
+            textLineHeight: 34,
+            frameHeight: 50,
+            itemSpacingY: 8,
+            windowPaddingY: 16,
+            scrollbarSize: 28,
+            uiScale: 2);
+
+        Assert.True(minimum > ReplayWindow.ReplayWindowMinimumHeight);
+
+        // Doubling the UI scale nearly doubles the requirement. It stays short of
+        // exactly 2x because the bottom panel still reserves unscaled reference
+        // lengths for the Timeline track and Quick Jump cards.
+        Assert.True(scaled > minimum * 1.8f);
+        Assert.True(scaled < minimum * 2);
+        Assert.Equal(
+            minimum,
+            ReplayWindow.ResolveReplayMinimumWindowHeight(17, 25, 4, 8, 14, 0));
+    }
+
+    [Fact]
+    public void ReplaySidebarsKeepAFixedWidthAndGiveExtraWidthToArena()
+    {
+        var minimum = ReplayWindow.ResolveReplayColumnWidths(1_200);
+        var reference = ReplayWindow.ResolveReplayColumnWidths(1_600);
+        var wide = ReplayWindow.ResolveReplayColumnWidths(2_000);
+
+        // Both sidebars stay at their reference width at every window size, so
+        // only the Arena column absorbs the extra space.
+        Assert.Equal(320, minimum.X);
+        Assert.Equal(320, reference.X);
+        Assert.Equal(320, wide.X);
+        Assert.Equal(440, minimum.Z);
+        Assert.Equal(440, reference.Z);
+        Assert.Equal(440, wide.Z);
+        Assert.Equal(424, minimum.Y);
+        Assert.Equal(824, reference.Y);
+        Assert.Equal(1_224, wide.Y);
+        Assert.Equal(1_184, minimum.X + minimum.Y + minimum.Z);
+        Assert.Equal(1_984, wide.X + wide.Y + wide.Z);
+    }
+
+    [Fact]
+    public void ReplayColumnsScaleTheirFixedSidebars()
+    {
+        var widths = ReplayWindow.ResolveReplayColumnWidths(1_500, 1.25f);
+
+        Assert.Equal(400, widths.X);
+        Assert.Equal(530, widths.Y);
+        Assert.Equal(550, widths.Z);
+        Assert.Equal(1_480, widths.X + widths.Y + widths.Z);
+    }
+
+    [Fact]
+    public void DegenerateSurfaceShrinksBothSidebarsInsteadOfTheArena()
+    {
+        var widths = ReplayWindow.ResolveReplayColumnWidths(396);
+
+        Assert.Equal(0, widths.Y);
+        Assert.Equal(380, widths.X + widths.Z);
+        Assert.Equal(
+            ReplayWindow.ReplayLeftPanelWidth / ReplayWindow.ReplayRightPanelWidth,
+            widths.X / widths.Z,
+            4);
+    }
+
+    [Fact]
+    public void ReplayBottomPanelHeightTracksItsVisibleContent()
+    {
+        var height = ReplayWindow.ResolveReplayBottomPanelHeight(
+            frameHeight: 25,
+            textLineHeight: 17,
+            itemSpacingY: 4,
+            windowPaddingY: 8,
+            scrollbarSize: 14);
+
+        Assert.Equal(139, height);
+    }
+
+    [Fact]
+    public void ReplayBottomPanelHeightNeverClipsTheTimelineTrack()
+    {
+        var height = ReplayWindow.ResolveReplayBottomPanelHeight(
+            frameHeight: 12,
+            textLineHeight: 17,
+            itemSpacingY: 4,
+            windowPaddingY: 8,
+            scrollbarSize: 14);
+
+        Assert.Equal(134, height);
+    }
+
+    [Fact]
+    public void TimelineMarkersMapTimestampsAcrossTheTrack()
+    {
+        Assert.Equal(100, ReplayWindow.ResolveTimelineMarkerX(0, 10_000, 100, 400));
+        Assert.Equal(200, ReplayWindow.ResolveTimelineMarkerX(2_500, 10_000, 100, 400));
+        Assert.Equal(500, ReplayWindow.ResolveTimelineMarkerX(10_000, 10_000, 100, 400));
+    }
+
+    [Fact]
+    public void TimelineMarkersStayInsideTheTrackForDegenerateInput()
+    {
+        Assert.Equal(100, ReplayWindow.ResolveTimelineMarkerX(5_000, 0, 100, 400));
+        Assert.Equal(100, ReplayWindow.ResolveTimelineMarkerX(5_000, 10_000, 100, 0));
+        Assert.Equal(500, ReplayWindow.ResolveTimelineMarkerX(30_000, 10_000, 100, 400));
+        Assert.Equal(100, ReplayWindow.ResolveTimelineMarkerX(-1_000, 10_000, 100, 400));
+    }
+
+    [Theory]
+    [InlineData(CorrelationConfidence.High, "已關聯的致死傷害")]
+    [InlineData(CorrelationConfidence.Medium, "推測致死傷害")]
+    [InlineData(CorrelationConfidence.Low, "可能的最後一擊")]
+    [InlineData(CorrelationConfidence.Unavailable, "致死傷害")]
+    public void KillingBlowHeadingsUsePlayerFacingChinese(
+        CorrelationConfidence confidence,
+        string expected)
+    {
+        Assert.Equal(expected, ReplayWindow.FormatKillingBlowHeading(confidence));
+    }
+
+    [Fact]
+    public void KillingBlowCandidateHighlightRequiresAnExactDamageChange()
+    {
+        var candidate = new CorrelatedDamageEvent(100, 5, 1234, 2, 0, 1, 1000);
+        var change = new ReplayHealthChange(
+            100,
+            5,
+            1234,
+            2,
+            0,
+            1,
+            1000,
+            ActionEffectKind.Damage);
+
+        Assert.True(change.IsDamageCandidate(candidate));
+        Assert.False((change with { EffectEntryIndex = 2 }).IsDamageCandidate(candidate));
+        Assert.False((change with { Kind = ActionEffectKind.Heal }).IsDamageCandidate(candidate));
+        Assert.False(change.IsDamageCandidate(null));
+    }
+
+    [Fact]
+    public void DeathActionDamageAndEstimatedOverkillUseEmphasizedText()
+    {
+        Assert.True(ReplayWindow.KillingBlowActionTextScale >= 1.6f);
+        Assert.True(ReplayWindow.KillingBlowAmountTextScale >= 1.8f);
+    }
+
+    [Fact]
+    public void ImpactCardsShareOneValueScaleAndKeepTheirWidthWhenReflowed()
+    {
+        // Every impact card value uses the metric tier, so the emphasized
+        // overkill card is no longer smaller than the HP card beside it.
+        Assert.Equal(3, ReplayWindow.ResolveContextStatColumnCount(390, 3));
+        Assert.Equal(2, ReplayWindow.ResolveContextStatColumnCount(389, 3));
+        Assert.Equal(0, ReplayWindow.ResolveHealthChangeRowTextOffsetY(30, 30, 2));
+        Assert.Equal(4.5f, ReplayWindow.ResolveHealthChangeRowTextOffsetY(30, 17, 2));
+        Assert.Equal(9, ReplayWindow.ResolveHealthChangeRowTextOffsetY(60, 34, 4));
+        Assert.Equal(0, ReplayWindow.ResolveHealthChangeRowTextOffsetY(20, 40, 2));
+    }
+
+    [Fact]
+    public void ContextStateAndHealthChangeRowsKeepTheirProminence()
+    {
+        Assert.True(ReplayWindow.ContextStateTextScale >= 1.2f);
+        Assert.Equal(5, ReplayHealthChangeIndex.MaximumVisibleChanges);
+        Assert.Equal(10, ReplayWindow.MaximumDetailedHealthChanges);
+        Assert.True(
+            ReplayWindow.ContextMetricTextScale > ReplayWindow.ContextBodyTextScale);
+        Assert.True(ReplayWindow.ContextBodyTextScale > 1);
+        Assert.Equal(0.9f, ReplayWindow.ContextVitalsIconScale);
+        Assert.True(
+            ReplayWindow.KillingBlowAmountTextScale
+            > ReplayWindow.ContextMetricTextScale);
+        Assert.Equal(60, ReplayWindow.ResolveScaledLength(30, 2));
+        Assert.Equal(45, ReplayWindow.ResolveScaledLength(30, 1.5f));
+        Assert.Equal(30, ReplayWindow.ResolveScaledLength(30, 1));
+        Assert.Equal(30, ReplayWindow.ResolveScaledLength(30, 0));
+        Assert.Equal(30, ReplayWindow.ResolveScaledLength(30, -1));
+        Assert.Equal(30, ReplayWindow.ResolveScaledLength(30, float.NaN));
+        Assert.Equal(
+            5,
+            ReplayWindow.ResolveHealthChangeRenderedRowCount(0, 5));
+        Assert.Equal(
+            10,
+            ReplayWindow.ResolveHealthChangeRenderedRowCount(0, 10));
+        Assert.Equal(
+            10,
+            ReplayWindow.ResolveHealthChangeRenderedRowCount(3, 10));
+        Assert.Equal(
+            12,
+            ReplayWindow.ResolveHealthChangeRenderedRowCount(12, 10));
+        Assert.True(
+            ReplayWindow.ResolveHealthChangeDetailsVisibility(
+                currentlyVisible: false,
+                openRequested: true,
+                closeRequested: false));
+        Assert.True(
+            ReplayWindow.ResolveHealthChangeDetailsVisibility(
+                currentlyVisible: true,
+                openRequested: false,
+                closeRequested: false));
+        Assert.False(
+            ReplayWindow.ResolveHealthChangeDetailsVisibility(
+                currentlyVisible: true,
+                openRequested: false,
+                closeRequested: true));
+        Assert.Equal("Play##ReplayPlay", ReplayWindow.ResolvePlaybackButtonLabel(false));
+        Assert.Equal("Pause##ReplayPlay", ReplayWindow.ResolvePlaybackButtonLabel(true));
+
+        var damageColor = ReplayWindow.ResolveHealthChangeColor(ActionEffectKind.Damage);
+        var healingColor = ReplayWindow.ResolveHealthChangeColor(ActionEffectKind.Heal);
+        Assert.True(damageColor.X > damageColor.Y);
+        Assert.True(healingColor.Y > healingColor.X);
+    }
+
+    [Fact]
+    public void ContextStatsReflowOnlyTheThreeCardGrid()
+    {
+        Assert.Equal(3, ReplayWindow.ResolveContextStatColumnCount(390, 3));
+        Assert.Equal(2, ReplayWindow.ResolveContextStatColumnCount(389, 3));
+        Assert.Equal(2, ReplayWindow.ResolveContextStatColumnCount(200, 2));
+    }
+
+    [Fact]
+    public void PartyHpTextFallsBackWithoutOverlappingPercentage()
+    {
+        Assert.Equal(
+            PartyHpTextMode.Full,
+            ReplayWindow.ResolvePartyHpTextMode(150, 140, 70));
+        Assert.Equal(
+            PartyHpTextMode.CurrentOnly,
+            ReplayWindow.ResolvePartyHpTextMode(100, 140, 70));
+        Assert.Equal(
+            PartyHpTextMode.Hidden,
+            ReplayWindow.ResolvePartyHpTextMode(60, 140, 70));
     }
 
     private static ReplayDeathItem CreateDeathItem(

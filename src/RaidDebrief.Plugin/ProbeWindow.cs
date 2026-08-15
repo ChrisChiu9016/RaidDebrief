@@ -12,31 +12,19 @@ internal sealed class ProbeWindow : Window, IDisposable
     private readonly CaptureService captureService;
     private readonly ActionEffectReader actionEffectReader;
     private readonly Action openReplay;
-    private readonly Action<bool> savePostWipeDebriefSetting;
-    private readonly Action<bool> saveCloseReplayOnCombatStartSetting;
     private ulong selectedActorId;
-    private bool showPostWipeDebrief;
-    private bool closeReplayOnCombatStart;
 
     public ProbeWindow(
         LiveDataProbe probe,
         CaptureService captureService,
         ActionEffectReader actionEffectReader,
-        Action openReplay,
-        bool showPostWipeDebrief,
-        Action<bool> savePostWipeDebriefSetting,
-        bool closeReplayOnCombatStart,
-        Action<bool> saveCloseReplayOnCombatStartSetting)
+        Action openReplay)
         : base("Raid Debrief — Capture 與即時資料##RaidDebriefProbe")
     {
         this.probe = probe;
         this.captureService = captureService;
         this.actionEffectReader = actionEffectReader;
         this.openReplay = openReplay;
-        this.showPostWipeDebrief = showPostWipeDebrief;
-        this.savePostWipeDebriefSetting = savePostWipeDebriefSetting;
-        this.closeReplayOnCombatStart = closeReplayOnCombatStart;
-        this.saveCloseReplayOnCombatStartSetting = saveCloseReplayOnCombatStartSetting;
         this.SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(520, 420),
@@ -46,6 +34,12 @@ internal sealed class ProbeWindow : Window, IDisposable
 
     public void Dispose() =>
         this.probe.SetProbeRefreshEnabled(false);
+
+    public void SetEmbeddedVisible(bool visible) =>
+        this.probe.SetProbeRefreshEnabled(visible);
+
+    public void DrawEmbedded() =>
+        this.DrawContents();
 
     public override void OnOpen()
     {
@@ -59,7 +53,10 @@ internal sealed class ProbeWindow : Window, IDisposable
         base.OnClose();
     }
 
-    public override void Draw()
+    public override void Draw() =>
+        this.DrawContents();
+
+    private void DrawContents()
     {
         this.DrawProbeSummary();
         this.DrawCapture();
@@ -133,36 +130,6 @@ internal sealed class ProbeWindow : Window, IDisposable
         }
 
         var automaticCaptureEnabled = status.AutomaticCaptureEnabled;
-        if (!status.IsRecording && !status.IsBusy)
-        {
-            if (ImGui.Checkbox("自動 Pull 擷取", ref automaticCaptureEnabled))
-            {
-                this.captureService.SetAutomaticCaptureEnabled(automaticCaptureEnabled);
-            }
-        }
-        else
-        {
-            ImGui.TextUnformatted(
-                $"模式：{(automaticCaptureEnabled ? "自動 Pull" : "手動")}（擷取或背景工作期間不可切換）");
-        }
-
-        if (ImGui.Checkbox(
-                "Wipe 後顯示 Debrief 摘要",
-                ref this.showPostWipeDebrief))
-        {
-            this.savePostWipeDebriefSetting(this.showPostWipeDebrief);
-        }
-
-        if (ImGui.Checkbox(
-                "進入戰鬥時自動關閉 Replay 視窗",
-                ref this.closeReplayOnCombatStart))
-        {
-            this.saveCloseReplayOnCombatStartSetting(this.closeReplayOnCombatStart);
-        }
-        if (!this.closeReplayOnCombatStart)
-        {
-            ImGui.TextDisabled("停用時視窗會保持開啟，但戰鬥期間 Replay 仍會暫停。");
-        }
 
         if (automaticCaptureEnabled)
         {

@@ -124,6 +124,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 1_001,
                 actionType: 1,
                 sourceObjectId: 111,
+                sourceEntityId: 111,
                 animationTargetObjectId: 111,
                 [CreateDamageTarget(111, 1_111)]);
             dutyState.Raise(ObservedEventType.DutyWiped);
@@ -139,6 +140,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 2_002,
                 actionType: 1,
                 sourceObjectId: 222,
+                sourceEntityId: 222,
                 animationTargetObjectId: 222,
                 [CreateDamageTarget(222, 2_222)]);
             dutyState.Raise(ObservedEventType.DutyCompleted);
@@ -154,6 +156,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 3_003,
                 actionType: 1,
                 sourceObjectId: 333,
+                sourceEntityId: 333,
                 animationTargetObjectId: 333,
                 [CreateDamageTarget(333, 3_333)]);
             dutyState.Raise(ObservedEventType.DutyWiped);
@@ -516,6 +519,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 2_002,
                 actionType: 1,
                 sourceObjectId: 1_002,
+                sourceEntityId: 1_002,
                 animationTargetObjectId: 1_002,
                 []);
             dutyState.Raise(ObservedEventType.DutyWiped);
@@ -670,6 +674,75 @@ public sealed class CaptureServiceLifecycleTests
     }
 
     [Fact]
+    public void ActionEffectWithoutCastQueuesActionNameResolutionOnNextFrame()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var resolutionRequests = new List<(uint ActionId, uint SourceEntityId)>();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            automaticCaptureEnabled: false,
+            resolveActionName: (actionId, sourceEntityId) =>
+            {
+                resolutionRequests.Add((actionId, sourceEntityId));
+                return new RecordedActionName
+                {
+                    ActionId = actionId,
+                    Name = "Auto-attack",
+                    Language = "English",
+                    Source = ActionNameSource.StaticExcel,
+                };
+            });
+        try
+        {
+            Assert.True(service.Start(1154, 835, 0));
+            service.RecordActionEffect(
+                globalSequence: 1,
+                actionId: 34_423,
+                actionType: 1,
+                sourceObjectId: 777,
+                sourceEntityId: 777,
+                animationTargetObjectId: 888,
+                [CreateDamageTarget(888, 25_670)]);
+            service.RecordActionEffect(
+                globalSequence: 2,
+                actionId: 34_423,
+                actionType: 1,
+                sourceObjectId: 777,
+                sourceEntityId: 777,
+                animationTargetObjectId: 888,
+                [CreateDamageTarget(888, 27_472)]);
+            Assert.Empty(resolutionRequests);
+
+            service.RecordFrameworkSnapshot(
+                [CreateActor("Boss", 777, ObjectKind.BattleNpc)],
+                [],
+                true,
+                1154,
+                835,
+                0);
+            Assert.True(service.StopAndExport());
+
+            var record = WaitForCompleted(service, expectedCompletedPullCount: 1);
+            Assert.Equal(2, record.ActionEffects.Length);
+            Assert.DoesNotContain(
+                record.Events,
+                observedEvent => observedEvent.Type == ObservedEventType.CastStarted);
+            var actionName = Assert.Single(record.ActionNames);
+            Assert.Equal(34_423u, actionName.ActionId);
+            Assert.Equal("Auto-attack", actionName.Name);
+            Assert.Equal(ActionNameSource.StaticExcel, actionName.Source);
+            Assert.Equal([(34_423u, 777u)], resolutionRequests);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
     public void ManualModeStillRequiresExplicitStartAndStop()
     {
         var exportDirectory = CreateExportDirectory();
@@ -743,6 +816,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 42,
                 actionType: 1,
                 sourceObjectId: 777,
+                sourceEntityId: 777,
                 animationTargetObjectId: 777,
                 [CreateDamageTarget(777, 100), CreateDamageTarget(777, 200)]);
 
@@ -846,6 +920,7 @@ public sealed class CaptureServiceLifecycleTests
                 actionId: 42,
                 actionType: 1,
                 sourceObjectId: 100,
+                sourceEntityId: 100,
                 animationTargetObjectId: null,
                 []);
 

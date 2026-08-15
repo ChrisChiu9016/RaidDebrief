@@ -154,11 +154,17 @@ public sealed class DebriefSummaryControllerTests
 
         Assert.True(configuration.ShowPostWipeDebrief);
         Assert.True(configuration.CloseReplayOnCombatStart);
+        Assert.False(configuration.DeveloperModeEnabled);
 
         var restored = JsonConvert.DeserializeObject<PluginConfiguration>(
             """{"Version":1,"ShowWipeReplayPrompt":false}""");
         Assert.NotNull(restored);
         Assert.False(restored.ShowPostWipeDebrief);
+
+        var developerRestored = JsonConvert.DeserializeObject<PluginConfiguration>(
+            """{"Version":1,"DeveloperModeEnabled":true}""");
+        Assert.NotNull(developerRestored);
+        Assert.True(developerRestored.DeveloperModeEnabled);
     }
 
     private static ReplaySourceSnapshot CreateSnapshot(

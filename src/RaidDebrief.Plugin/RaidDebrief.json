@@ -2,7 +2,7 @@
   "Author": "LeScent",
   "Name": "Raid Debrief",
   "Punchline": "快速確認最近一次高難度戰鬥發生了什麼。",
-  "Description": "使用 /rdb 或 /rdebrief 開啟最近一次 Pull 的 Replay 主畫面。",
+  "Description": "使用 /rdb 或 /rdebrief 開啟最近一次 Pull 的 Replay 主畫面。完全獨立，僅依賴Dalamud API，理論上只要Dalamud能運作就能運作。",
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/ChrisChiu9016/RaidDebrief",
   "IconUrl": "https://raw.githubusercontent.com/ChrisChiu9016/RaidDebrief/main/images/icon.png",

@@ -22,6 +22,61 @@ public static class PullRecordValidator
             throw new InvalidDataException("Capture end time precedes its start time.");
         }
 
+        if (record.CaptureMode is { } captureMode && !Enum.IsDefined(captureMode))
+        {
+            throw new InvalidDataException($"Capture mode {captureMode} is invalid.");
+        }
+
+        if (record.EndReason is { } endReason && !Enum.IsDefined(endReason))
+        {
+            throw new InvalidDataException($"Pull end reason {endReason} is invalid.");
+        }
+
+        var hasDutyRunFeature = (record.Features & CaptureFeatures.DutyRunIdentity) != 0;
+        if (hasDutyRunFeature != (record.DutyRun is not null))
+        {
+            throw new InvalidDataException(
+                "DutyRunIdentity capture feature and Duty Run metadata must be present together.");
+        }
+
+        if (record.DutyRun is { } dutyRun)
+        {
+            if (record.CaptureMode != RaidDebrief.Core.CaptureMode.AutomaticPull)
+            {
+                throw new InvalidDataException(
+                    "Duty Run metadata is only valid for automatic Pull captures.");
+            }
+
+            if (dutyRun.DutyRunId == Guid.Empty)
+            {
+                throw new InvalidDataException("Duty Run ID must not be empty.");
+            }
+
+            if (dutyRun.ContentFinderConditionId == 0)
+            {
+                throw new InvalidDataException(
+                    "Duty Run Content Finder Condition ID must not be zero.");
+            }
+
+            if (string.IsNullOrWhiteSpace(dutyRun.DutyName)
+                || string.IsNullOrWhiteSpace(dutyRun.DutyRunName))
+            {
+                throw new InvalidDataException("Duty Run names must not be empty.");
+            }
+
+            if (dutyRun.PullOrdinalWithinDutyRun <= 0)
+            {
+                throw new InvalidDataException(
+                    "Duty Run Pull ordinal must be positive.");
+            }
+
+            if (dutyRun.DutyEnteredAtUtc > record.StartedAtUtc)
+            {
+                throw new InvalidDataException(
+                    "Duty Run entry time must not follow the Pull start time.");
+            }
+        }
+
         if (record.Actors is null)
         {
             throw new InvalidDataException("Capture actors are missing.");

@@ -15,6 +15,9 @@ ActivePull
       ▼
 Finalized PullRecord
       │
+      ├──────────────► Automatic Pull History writer
+      │                  └─ history/<UTC date>/<CaptureId>.json.gz
+      │                  └─ history/history-index.json
       ├──────────────► Dev/Test compressed JSON export
       │
       ▼
@@ -24,9 +27,9 @@ LastCompletedPull
 Debrief / Replay
 ```
 
-`ActivePull` is the fresh, Pull-local data container for the combat currently being recorded. `LastCompletedPull` is the most recent `PullRecord` that finalized successfully and passed validation. Debrief and Replay consume `LastCompletedPull` directly as a finalized `PullRecord`; they do not depend on JSON persistence.
+`ActivePull` is the fresh, Pull-local data container for the combat currently being recorded. `LastCompletedPull` is the most recent `PullRecord` that finalized successfully and passed validation. Debrief and Runtime Replay continue to consume `LastCompletedPull` directly; automatic History persistence is an independent background sink and cannot make Runtime Replay finalization fail.
 
-The central architectural rule is that Replay, Debrief, and Analysis consume recorded data, never live game objects. JSON export belongs to development and testing infrastructure, not the runtime replay path.
+The central architectural rule is that Replay, Debrief, Analysis, and History consume finalized recorded data, never live game objects. Developer/Test export remains an explicit testing path; automatic History only accepts validated automatic Pull captures with Duty Run identity.
 
 ## 2. Suggested Solution Layout
 
@@ -113,7 +116,7 @@ Idle
 - Probe-only diagnostic strings are formatted lazily from the latest structured Event／Action Effect identity rather than on every capture callback.
 
 
-### Runtime State and Development/Test Serialization
+### Runtime State, Automatic History, and Development/Test Serialization
 
 Runtime state is intentionally in-memory and limited to:
 
@@ -124,25 +127,34 @@ ReplaySourceSnapshot
 ├─ FinalizationGeneration / State / CaptureId / Error
 └─ CompletedGeneration / LastCompletedPull
 
+Automatic History:
+DutyRunTracker
+├─ ContentFinderConditionId / Duty name
+├─ locally generated DutyRunId / entry UTC
+└─ Pull ordinal within the uninterrupted Duty visit
+PullHistoryStore
+├─ one compact GZip PullRecord per automatic Pull
+└─ atomic `history-index.json`
+
 Development / Testing:
 PullRecord ↔ compact JSON + GZip (`.json.gz`) or legacy JSON (`.json`) fixture
 ```
 
-- Runtime does not use disk to determine the last Pull. The atomic Replay source snapshot replaces its `LastCompletedPull` reference in memory only after successful finalization and validation.
-- Plugin startup or reload does not restore the previous session's last Pull. It may initialize with `ActivePull = null` and `LastCompletedPull = null`.
-- Runtime requires no `capture-index.json`, persistent latest-Pull lookup, sequence ordering, startup scan of historical Pulls, or cross-session combat-history recovery.
-- New explicit developer/test exports store compact, named, UTF-8 JSON inside a GZip container at `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz`, using the Pull's UTC start time; legacy and repository fixtures remain loadable as plain `.json`.
-- The Developer tab can explicitly export the current validated in-memory `LastCompletedPull` to the same `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz` format. This snapshots the immutable record reference under the Capture lock and serializes it on a separate tracked background task, so it does not block the next Pull from starting; plugin disposal drains the task before returning.
-- Re-exporting the same `LastCompletedPull` atomically replaces the file for that Capture ID. It does not create history, an index, retention, or automatic runtime restoration.
-- There is no special “Latest Pull JSON” file and no runtime dependency on `last-capture.json` or any replacement for it.
-- Real FFXIV Pulls can be exported as compressed fixtures; Offline Replay can load compressed or legacy plain fixtures; regression tests can reuse the same Pull; and JSON round-trip and validator tests remain supported.
-
-Compressed JSON persistence is a development and testing facility, not a prerequisite for runtime replay.
+- Runtime does not use disk to determine the current `LastCompletedPull`. The atomic Replay source snapshot replaces its in-memory reference only after successful finalization and validation.
+- Plugin startup or reload does not restore the previous session's Runtime `LastCompletedPull`.
+- Each uninterrupted Duty visit receives a locally generated `DutyRunId`; pulls in that visit share the ID and increment `PullOrdinalWithinDutyRun`. A new Zone initialization, `BoundByDuty` disconnect/reconnect boundary, or Plugin reload conservatively creates a new Duty Run rather than falsely merging visits.
+- The History group name snapshots the localized Duty name plus local entry time. `ContentFinderConditionId` identifies the Duty definition; `IClientState.Instance`, Actor IDs, party composition, and timing heuristics are not grouping keys.
+- Only successfully validated automatic Pulls with Duty Run identity enter History. Developer manual captures remain explicit test artifacts and never enter the automatic index.
+- History writes one atomic `<CaptureId>.json.gz` under `history/<UTC date>/`, then atomically replaces `history/history-index.json`. The single background writer is drained on Plugin disposal and does not block the next Capture.
+- Startup recovery drops index entries whose files are missing and adds valid orphan automatic Pull files. An older History index is rebuilt from its archived captures so derived metadata such as final Boss HP is backfilled. Legacy captures without Duty Run identity remain loadable but ungrouped.
+- Explicit developer/test exports retain the `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz` naming format, legacy repository fixtures remain loadable as plain `.json`, and re-exporting a `LastCompletedPull` still does not affect History.
+- There is no special “Latest Pull JSON” file and no runtime dependency on `last-capture.json`.
+- The independent History window opens from the Replay page, reads a non-allocating immutable snapshot, presents newest Duty Runs and Pulls first, and loads a selected archive through the same background `ReplayLoadCoordinator` and `ReplaySession` path. Its index caches final Boss HP only when the final frame has exactly one renderable BattleNpc candidate with nonzero Max HP; ambiguous encounters display no percentage rather than inferring a primary Boss. History selection never replaces Runtime `LastCompletedPull`; retention, Pull Compare, and automatic restoration into Runtime Replay are separate phases.
 
 ### Capture Privacy
 
 - Serialized `ActorRecord.Name` values for player characters are generated as Pull-local aliases (`Player 1`, `Player 2`, …); NPC names remain intact for encounter analysis.
-- Capture snapshots and `PullRecord` do not contain Content IDs. Entity and game object IDs are ephemeral combat-instance identifiers used only for source/target correlation.
+- Capture snapshots do not contain player Content IDs. `ContentFinderConditionId` is non-player Duty metadata; Entity and game object IDs remain ephemeral combat-instance identifiers used only for source/target correlation.
 - Existing captures remain load-compatible, but any historical file created before this rule may still contain raw player names and must not be shared without review.
 
 
@@ -366,22 +378,26 @@ Required export format:
 
 The GZip container does not change `schemaVersion`; schema versioning continues to describe the decompressed `PullRecord` JSON. Repository regression fixtures remain plain JSON so their reviewed byte length, SHA-256, and provenance stay unchanged.
 
-JSON persistence is a development and testing facility, not a prerequisite for runtime replay.
+Automatic History persistence is a production archive sink for validated automatic Pulls. Developer/Test export remains a separate explicit facility and is not used to populate History.
 
 ## 11. Scope Boundary
 
-Raid Debrief is a post-combat tool for immediately replaying the Pull that just ended. It is not a persistent combat history system.
+Raid Debrief remains replay-first. The approved History stages persist and group validated automatic Pulls, but they do not add comparison, performance scoring, session statistics, or strategy analysis.
 
-The current architecture does not include:
+Implemented in the current History scope:
 
-- Persistent Pull History
-- Recent Pulls
-- Pull History UI
+- Automatic Pull archive files
+- Duty Run identity and per-run Pull ordinal
+- Group names using localized Duty name plus entry time
+- Conservative new groups after Plugin reload, reconnect, or a new zone initialization
+- Recoverable lightweight index
+- History tab with grouped browsing, objective end-state labels, selected-Pull status, and background Replay loading
+
+Not included in this stage:
+
+- Retention Management
 - Pull Compare
 - Session Statistics
-- Retention Management
-- Cross-session Replay History
+- Cross-reload continuation of one Duty Run
 - DPS / Rotation analysis
 - AI responsibility judgment
-
-Whether Recent 2–3 Pulls are needed will be decided only after feedback from real high-end encounter use. Do not pre-build history or index infrastructure for that possibility.

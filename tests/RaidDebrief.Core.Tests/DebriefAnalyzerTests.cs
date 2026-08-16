@@ -114,6 +114,32 @@ public sealed class DebriefAnalyzerTests
     }
 
     [Fact]
+    public void ResolvesFinalBossHpWithoutRequiringWipeEvent()
+    {
+        var record = CreateRecord(
+            events: [],
+            frames:
+            [
+                CreateFrame(
+                    0,
+                    CreateSample(1, 100, 100),
+                    CreateSample(10, 750, 1_000, targetable: true)),
+                CreateFrame(
+                    4_000,
+                    CreateSample(1, 100, 100),
+                    CreateSample(10, 425, 1_000, targetable: true)),
+            ],
+            endedAfterMilliseconds: 5_000);
+
+        var bossHp = Assert.IsType<DebriefBossHp>(
+            DebriefAnalyzer.ResolveFinalBossHp(record));
+
+        Assert.Equal(425u, bossHp.CurrentHp);
+        Assert.Equal(1_000u, bossHp.MaxHp);
+        Assert.Equal(42.5f, bossHp.Percentage, 3);
+    }
+
+    [Fact]
     public void IgnoresNpcDeathsAndReportsUnresolvedDeathEvents()
     {
         var record = CreateRecord(

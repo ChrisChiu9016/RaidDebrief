@@ -71,14 +71,13 @@ public sealed class ReplayPreviousPullLoadingTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData((int)ReplaySourceMode.RuntimeLastCompletedPull)]
+    [InlineData((int)ReplaySourceMode.HistoryArchive)]
+    [InlineData((int)ReplaySourceMode.DeveloperTestFixture)]
     public void NewerRequestSupersedesOlderBackgroundRuntimeBuild(
-        bool useDeveloperTestSource)
+        int newerModeValue)
     {
-        var newerMode = useDeveloperTestSource
-            ? ReplaySourceMode.DeveloperTestFixture
-            : ReplaySourceMode.RuntimeLastCompletedPull;
+        var newerMode = (ReplaySourceMode)newerModeValue;
         var first = CreateRecord(Guid.Parse("f6ee424c-583c-4714-a013-af74e14c34ee"));
         var second = CreateRecord(Guid.Parse("fb26cb22-d2de-49d7-b12c-b1fcc931159c"));
         using var firstStarted = new ManualResetEventSlim();
@@ -126,6 +125,67 @@ public sealed class ReplayPreviousPullLoadingTests
         allowFirst.Set();
         Assert.True(firstFinished.Wait(TimeSpan.FromSeconds(5)));
         Assert.False(coordinator.TryTakeCompleted(out _));
+    }
+
+    [Theory]
+    [InlineData(null, "—")]
+    [InlineData(0f, "0.0%")]
+    [InlineData(42.5f, "42.5%")]
+    [InlineData(100f, "100.0%")]
+    public void HistoryFormatsFinalBossHp(float? percentage, string expected)
+    {
+        Assert.Equal(expected, HistoryWindow.FormatFinalBossHp(percentage));
+    }
+
+    [Fact]
+    public void HistoryReplayButtonReflectsActiveAndLoadingCapture()
+    {
+        var activeId = Guid.Parse("2198c474-6968-4b0d-b6bc-d93ae37d9269");
+        var loadingId = Guid.Parse("abfbc705-497a-4fd4-9f89-dca9b8948690");
+        var state = new HistoryReplayState(activeId, loadingId);
+
+        Assert.Equal(
+            HistoryReplayButtonState.Active,
+            HistoryWindow.ResolveReplayButtonState(activeId, state));
+        Assert.Equal(
+            HistoryReplayButtonState.Loading,
+            HistoryWindow.ResolveReplayButtonState(loadingId, state));
+        Assert.Equal(
+            HistoryReplayButtonState.Available,
+            HistoryWindow.ResolveReplayButtonState(Guid.NewGuid(), state));
+        Assert.Equal(
+            "查看中",
+            HistoryWindow.FormatReplayButtonLabel(HistoryReplayButtonState.Active));
+        Assert.Equal(
+            "載入中",
+            HistoryWindow.FormatReplayButtonLabel(HistoryReplayButtonState.Loading));
+        Assert.Equal(
+            "查看",
+            HistoryWindow.FormatReplayButtonLabel(HistoryReplayButtonState.Available));
+    }
+
+    [Fact]
+    public void HistoryDurationUsesRecordedPullBounds()
+    {
+        var startedAtUtc = DateTimeOffset.Parse("2026-08-16T07:43:26Z");
+        var entry = new PullHistoryEntry
+        {
+            CaptureId = Guid.NewGuid(),
+            DutyRunId = Guid.NewGuid(),
+            ContentFinderConditionId = 1_003,
+            DutyName = "AAC Heavyweight M4",
+            DutyRunName = "AAC Heavyweight M4 · 2026-08-16 15:43:26",
+            DutyEnteredAtUtc = startedAtUtc.AddMinutes(-1),
+            PullOrdinalWithinDutyRun = 2,
+            StartedAtUtc = startedAtUtc,
+            EndedAtUtc = startedAtUtc.AddSeconds(93.125),
+            EndReason = PullEndReason.DutyWiped,
+            RelativeFilePath = "2026-08-16/capture.json.gz",
+            CompressedBytes = 1_024,
+            CaptureSchemaVersion = CaptureSchema.CurrentVersion,
+        };
+
+        Assert.Equal("01:33.125", HistoryWindow.FormatDuration(entry));
     }
 
     private static ReplayLoadCompletion WaitForCompletion(ReplayLoadCoordinator coordinator)

@@ -61,6 +61,61 @@ public sealed class CaptureServiceLifecycleTests
             DeleteExportDirectory(exportDirectory);
         }
     }
+
+    [Fact]
+    public void AutomaticPullsSnapshotDutyRunIdentityAndQueueHistory()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        var tracker = new DutyRunTracker(
+            () => DateTimeOffset.Parse("2026-08-16T07:43:26Z"),
+            TimeZoneInfo.Utc);
+        tracker.ObserveBoundState(true, 100, 1_003, "AAC Heavyweight M4");
+        var archived = new List<PullRecord>();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            beginDutyPull: tracker.BeginPull,
+            archiveAutomaticPull: archived.Add);
+        try
+        {
+            service.RecordFrameworkSnapshot([], [], false, 100, 200, 0);
+            service.RecordFrameworkSnapshot(
+                [CreateActor("First Pull", 101)],
+                [],
+                true,
+                100,
+                200,
+                0);
+            dutyState.Raise(ObservedEventType.DutyWiped);
+            var first = WaitForCompleted(service, expectedCompletedPullCount: 1);
+
+            service.RecordFrameworkSnapshot([], [], false, 100, 200, 0);
+            service.RecordFrameworkSnapshot(
+                [CreateActor("Second Pull", 202)],
+                [],
+                true,
+                100,
+                200,
+                0);
+            dutyState.Raise(ObservedEventType.DutyWiped);
+            var second = WaitForCompleted(service, expectedCompletedPullCount: 2);
+
+            Assert.NotNull(first.DutyRun);
+            Assert.NotNull(second.DutyRun);
+            Assert.Equal(first.DutyRun.DutyRunId, second.DutyRun.DutyRunId);
+            Assert.Equal(1, first.DutyRun.PullOrdinalWithinDutyRun);
+            Assert.Equal(2, second.DutyRun.PullOrdinalWithinDutyRun);
+            Assert.Equal(CaptureMode.AutomaticPull, first.CaptureMode);
+            Assert.Equal(PullEndReason.DutyWiped, first.EndReason);
+            Assert.Equal([first.CaptureId, second.CaptureId], archived.Select(item => item.CaptureId));
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
     [Fact]
     public void ReplaySourceSnapshotExposesFinalizationAndCompletionAtomically()
     {
@@ -1173,7 +1228,9 @@ public sealed class CaptureServiceLifecycleTests
         Action<string, PullRecord>? exportCapture = null,
         Action<PullRecord>? validateCapture = null,
         Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null,
-        Func<uint, uint, RecordedActionName?>? resolveActionName = null)
+        Func<uint, uint, RecordedActionName?>? resolveActionName = null,
+        Func<DutyPullIdentity?>? beginDutyPull = null,
+        Action<PullRecord>? archiveAutomaticPull = null)
     {
         var log = pluginLog ?? new FakePluginLog();
         return new CaptureService(
@@ -1188,7 +1245,9 @@ public sealed class CaptureServiceLifecycleTests
             exportCapture,
             validateCapture,
             analyzeDebrief,
-            resolveActionName);
+            resolveActionName,
+            beginDutyPull,
+            archiveAutomaticPull);
     }
 
     private static void WaitForBackgroundWork(CaptureService service)

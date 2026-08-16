@@ -17,11 +17,13 @@ internal sealed class LiveDataProbe : IDisposable
     private readonly IFramework framework;
     private readonly ICondition condition;
     private readonly IClientState clientState;
+    private readonly IDutyState dutyState;
     private readonly IPartyList partyList;
     private readonly IObjectTable objectTable;
     private readonly IPluginLog log;
     private readonly CaptureService captureService;
     private readonly BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog;
+    private readonly DutyRunTracker dutyRunTracker;
     private readonly ActorProbeSnapshot[] actors;
     private readonly PolledStatusObservation[]?[] actorStatuses;
     private readonly ActorNameCache actorNameCache;
@@ -38,19 +40,24 @@ internal sealed class LiveDataProbe : IDisposable
         IFramework framework,
         ICondition condition,
         IClientState clientState,
+        IDutyState dutyState,
         IPartyList partyList,
         IObjectTable objectTable,
         IPluginLog log,
         CaptureService captureService,
+        DutyRunTracker dutyRunTracker,
         BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog)
     {
         this.framework = framework;
         this.condition = condition;
         this.clientState = clientState;
+        this.dutyState = dutyState;
         this.partyList = partyList;
         this.objectTable = objectTable;
         this.log = log;
         this.captureService = captureService;
+        this.dutyRunTracker = dutyRunTracker
+            ?? throw new ArgumentNullException(nameof(dutyRunTracker));
         this.omnidirectionalityCatalog = omnidirectionalityCatalog
             ?? throw new ArgumentNullException(nameof(omnidirectionalityCatalog));
         this.actors = new ActorProbeSnapshot[objectTable.Length];
@@ -192,6 +199,16 @@ internal sealed class LiveDataProbe : IDisposable
             this.condition[ConditionFlag.BoundByDuty],
             this.condition[ConditionFlag.BoundByDuty56],
             this.condition[ConditionFlag.BoundByDuty95]);
+        var contentFinderCondition = this.dutyState.ContentFinderCondition;
+        var contentFinderConditionId = contentFinderCondition.RowId;
+        var dutyName = contentFinderConditionId != 0 && contentFinderCondition.IsValid
+            ? contentFinderCondition.Value.Name.ToString()
+            : null;
+        this.dutyRunTracker.ObserveBoundState(
+            this.IsInDutyInstance,
+            this.TerritoryType,
+            contentFinderConditionId,
+            dutyName);
         this.InCombat = this.condition[ConditionFlag.InCombat];
         this.LocalPlayerGameObjectId = this.objectTable.LocalPlayer?.GameObjectId ?? 0;
     }

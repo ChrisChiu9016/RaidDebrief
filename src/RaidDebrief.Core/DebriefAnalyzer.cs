@@ -101,6 +101,14 @@ public sealed class DebriefAnalyzer
         return null;
     }
 
+    public static DebriefBossHp? ResolveFinalBossHp(PullRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        return ResolveBossHpAtTimestamp(
+            record,
+            PullTiming.CalculateDurationMilliseconds(record));
+    }
+
     private static DebriefBossHp? ResolveBossHpAtTimestamp(
         PullRecord record,
         long timestampMilliseconds)

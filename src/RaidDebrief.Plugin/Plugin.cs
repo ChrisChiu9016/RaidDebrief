@@ -1,4 +1,5 @@
 using System;
+using Dalamud.Game.ClientState;
 using Dalamud.Game.Command;
 using Dalamud.IoC;
 using Dalamud.Interface.Windowing;
@@ -71,11 +72,14 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TargetMarkerReader targetMarkerReader;
     private readonly BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog;
     private readonly CaptureActionNameResolver captureActionNameResolver;
+    private readonly DutyRunTracker dutyRunTracker;
+    private readonly PullHistoryStore pullHistoryStore;
     private readonly CaptureService captureService;
     private readonly ActionEffectReader actionEffectReader;
     private readonly LiveDataProbe liveDataProbe;
     private readonly ProbeWindow probeWindow;
     private readonly ReplayWindow replayWindow;
+    private readonly HistoryWindow historyWindow;
     private readonly DebriefSummaryWindow debriefSummaryWindow;
     private readonly PluginCommandRouter commandRouter;
     private readonly bool[] registeredCommands = new bool[CommandNames.Length];
@@ -84,31 +88,42 @@ public sealed class Plugin : IDalamudPlugin
     {
         this.configuration = PluginInterface.GetPluginConfig() as PluginConfiguration
             ?? new PluginConfiguration();
+        var pluginConfigurationDirectory = PluginInterface.GetPluginConfigDirectory();
+        this.dutyRunTracker = new DutyRunTracker();
+        this.pullHistoryStore = new PullHistoryStore(pluginConfigurationDirectory, Log);
         this.waymarkReader = new WaymarkReader(Log);
         this.targetMarkerReader = new TargetMarkerReader(Log);
         this.omnidirectionalityCatalog = new BattleNpcOmnidirectionalityCatalog(DataManager, Log);
         this.captureActionNameResolver = new CaptureActionNameResolver(DataManager, GameGui, Log);
         this.captureService = new CaptureService(
-            PluginInterface.GetPluginConfigDirectory(),
+            pluginConfigurationDirectory,
             DutyState,
             Log,
             this.waymarkReader,
             this.targetMarkerReader,
             this.configuration.AutomaticCaptureEnabled,
             this.SaveAutomaticCaptureSetting,
-            resolveActionName: this.captureActionNameResolver.TryResolve);
+            resolveActionName: this.captureActionNameResolver.TryResolve,
+            beginDutyPull: this.dutyRunTracker.BeginPull,
+            archiveAutomaticPull: record =>
+            {
+                this.pullHistoryStore.TryEnqueue(record);
+            });
         this.actionEffectReader = new ActionEffectReader(
             GameInteropProvider,
             Log,
             this.captureService);
+        ClientState.ZoneInit += this.OnZoneInit;
         this.liveDataProbe = new LiveDataProbe(
             Framework,
             Condition,
             ClientState,
+            DutyState,
             PartyList,
             ObjectTable,
             Log,
             this.captureService,
+            this.dutyRunTracker,
             this.omnidirectionalityCatalog);
         this.probeWindow = new ProbeWindow(
             this.liveDataProbe,
@@ -117,6 +132,8 @@ public sealed class Plugin : IDalamudPlugin
             this.OpenReplayUi);
         this.replayWindow = new ReplayWindow(
             this.captureService,
+            this.pullHistoryStore,
+            this.OpenHistoryUi,
             TextureProvider,
             DataManager,
             this.omnidirectionalityCatalog,
@@ -132,10 +149,15 @@ public sealed class Plugin : IDalamudPlugin
             this.probeWindow.SetEmbeddedVisible,
             PluginInterface.GetPluginConfigDirectory(),
             PluginInterface.AssemblyLocation.FullName);
+        this.historyWindow = new HistoryWindow(
+            this.pullHistoryStore,
+            this.replayWindow.OpenHistoryEntry,
+            this.replayWindow.GetHistoryReplayState);
         this.debriefSummaryWindow =
             new DebriefSummaryWindow(this.OpenDebriefReplay, TextureProvider);
         this.commandRouter = new PluginCommandRouter(this.OpenReplayUi);
         this.windowSystem.AddWindow(this.replayWindow);
+        this.windowSystem.AddWindow(this.historyWindow);
         this.windowSystem.AddWindow(this.debriefSummaryWindow);
 
         for (var index = 0; index < CommandNames.Length; index++)
@@ -167,6 +189,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        ClientState.ZoneInit -= this.OnZoneInit;
         PluginInterface.UiBuilder.Draw -= this.DrawUi;
         PluginInterface.UiBuilder.OpenMainUi -= this.OpenReplayUi;
         PluginInterface.UiBuilder.OpenConfigUi -= this.OpenReplayUi;
@@ -184,6 +207,7 @@ public sealed class Plugin : IDalamudPlugin
         this.liveDataProbe.Dispose();
         this.actionEffectReader.Dispose();
         this.captureService.Dispose();
+        this.pullHistoryStore.Dispose();
     }
 
     private void SaveAutomaticCaptureSetting(bool enabled)
@@ -215,6 +239,18 @@ public sealed class Plugin : IDalamudPlugin
         this.configuration.DeveloperModeEnabled = enabled;
         PluginInterface.SavePluginConfig(this.configuration);
     }
+
+    private void OnZoneInit(ZoneInitEventArgs args)
+    {
+        var contentFinderConditionId = args.ContentFinderCondition.RowId;
+        var dutyName = contentFinderConditionId != 0 && args.ContentFinderCondition.IsValid
+            ? args.ContentFinderCondition.Value.Name.ToString()
+            : null;
+        this.dutyRunTracker.ObserveZoneInitialized(
+            args.TerritoryType.RowId,
+            contentFinderConditionId,
+            dutyName);
+    }
     private void DrawUi()
     {
         var inCombat = this.liveDataProbe.InCombat;
@@ -234,6 +270,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OpenReplayUi() =>
         this.replayWindow.OpenRuntime(this.liveDataProbe.InCombat);
+
+    private void OpenHistoryUi() =>
+        this.historyWindow.IsOpen = true;
 
     private void OpenDebriefReplay(DebriefReplayRequest request) =>
         this.replayWindow.OpenDebriefReplay(request, this.liveDataProbe.InCombat);

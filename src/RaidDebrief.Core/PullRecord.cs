@@ -22,6 +22,7 @@ public enum CaptureFeatures
     ActionEffectCapture = 1 << 8,
     ActionNameSnapshot = 1 << 9,
     BarrierState = 1 << 10,
+    DutyRunIdentity = 1 << 11,
     // Preserve the legacy named value because existing JSON serializes this exact flag name.
     Current = All | TargetMarkerCanonicalOrder | OmnidirectionalState,
     ReplayPresentation = Current
@@ -50,6 +51,18 @@ public sealed record PullRecord
     public required uint MapId { get; init; }
 
     public required uint Instance { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public CaptureMode? CaptureMode { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public DutyPullIdentity? DutyRun { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public PullEndReason? EndReason { get; init; }
 
     public required ActorRecord[] Actors { get; init; }
 

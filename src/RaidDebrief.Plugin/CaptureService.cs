@@ -20,6 +20,8 @@ internal sealed class CaptureService : IDisposable
     private readonly Action<PullRecord> validateCapture;
     private readonly Func<PullRecord, long?, DebriefSummary> analyzeDebrief;
     private readonly Func<uint, uint, RecordedActionName?> resolveActionName;
+    private readonly Func<DutyPullIdentity?> beginDutyPull;
+    private readonly Action<PullRecord>? archiveAutomaticPull;
     private readonly IDutyState dutyState;
     private readonly IPluginLog log;
     private readonly WaymarkReader waymarkReader;
@@ -91,7 +93,9 @@ internal sealed class CaptureService : IDisposable
         Action<string, PullRecord>? exportCapture = null,
         Action<PullRecord>? validateCapture = null,
         Func<PullRecord, long?, DebriefSummary>? analyzeDebrief = null,
-        Func<uint, uint, RecordedActionName?>? resolveActionName = null)
+        Func<uint, uint, RecordedActionName?>? resolveActionName = null,
+        Func<DutyPullIdentity?>? beginDutyPull = null,
+        Action<PullRecord>? archiveAutomaticPull = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(developerExportDirectory);
         this.developerExportDirectory = Path.GetFullPath(developerExportDirectory);
@@ -99,6 +103,8 @@ internal sealed class CaptureService : IDisposable
         this.validateCapture = validateCapture ?? PullRecordValidator.Validate;
         this.analyzeDebrief = analyzeDebrief ?? new DebriefAnalyzer().Analyze;
         this.resolveActionName = resolveActionName ?? ((_, _) => null);
+        this.beginDutyPull = beginDutyPull ?? (() => null);
+        this.archiveAutomaticPull = archiveAutomaticPull;
         this.dutyState = dutyState;
         this.log = log;
         this.waymarkReader = waymarkReader;
@@ -578,10 +584,15 @@ internal sealed class CaptureService : IDisposable
             return false;
         }
 
+        var dutyRun = isAutomatic
+            ? this.beginDutyPull()
+            : null;
         this.activeCapture = new ActiveCapture(
             territoryType,
             mapId,
             instance,
+            isAutomatic ? CaptureMode.AutomaticPull : CaptureMode.ManualDeveloper,
+            dutyRun,
             this.actionEffectCaptureAvailable,
             this.resolveActionName);
         this.activeCaptureEpoch = ++this.nextActiveCaptureEpoch;
@@ -635,10 +646,13 @@ internal sealed class CaptureService : IDisposable
             throw new InvalidOperationException("Capture mode changed while a pull was active.");
         }
 
-        var record = this.activeCapture.Complete();
         var completedEndReason = isAutomatic
             ? this.automaticLifecycle.LastEndReason
             : null;
+        var record = this.activeCapture.Complete() with
+        {
+            EndReason = completedEndReason,
+        };
         var pullNumber = this.activePullOrdinal;
         var finalizationGeneration = this.BeginReplayFinalization(record);
         var endReason = completedEndReason?.ToString() ?? "ManualStop";
@@ -752,7 +766,10 @@ internal sealed class CaptureService : IDisposable
                         PullEndReason.PluginReload);
                 }
 
-                pendingRecord = this.activeCapture.Complete();
+                pendingRecord = this.activeCapture.Complete() with
+                {
+                    EndReason = pendingCompletedEndReason,
+                };
                 pendingFinalizationGeneration = this.BeginReplayFinalization(pendingRecord);
                 this.activeCapture = null;
                 this.activeCaptureIsAutomatic = false;
@@ -853,6 +870,21 @@ internal sealed class CaptureService : IDisposable
             isAutomatic ? "automatic Pull" : "manual",
             record.CaptureId,
             finalizeReason);
+
+        if (isAutomatic && this.archiveAutomaticPull is not null)
+        {
+            try
+            {
+                this.archiveAutomaticPull(record);
+            }
+            catch (Exception exception)
+            {
+                this.log.Error(
+                    exception,
+                    "Raid Debrief automatic Pull {CaptureId} could not be queued for History persistence.",
+                    record.CaptureId);
+            }
+        }
 
         if (!exportJson)
         {
@@ -1091,12 +1123,16 @@ internal sealed class CaptureService : IDisposable
             uint territoryType,
             uint mapId,
             uint instance,
+            CaptureMode captureMode,
+            DutyPullIdentity? dutyRun,
             bool actionEffectCaptureAvailable,
             Func<uint, uint, RecordedActionName?> resolveActionName)
         {
             this.TerritoryType = territoryType;
             this.MapId = mapId;
             this.Instance = instance;
+            this.CaptureMode = captureMode;
+            this.DutyRun = dutyRun;
             this.actionEffectCaptureComplete = actionEffectCaptureAvailable;
             this.resolveActionName = resolveActionName;
         }
@@ -1106,6 +1142,10 @@ internal sealed class CaptureService : IDisposable
         public uint MapId { get; }
 
         public uint Instance { get; }
+
+        public CaptureMode CaptureMode { get; }
+
+        public DutyPullIdentity? DutyRun { get; }
 
         public List<ActorRecord> Actors { get; } = new(32);
 
@@ -1373,13 +1413,18 @@ internal sealed class CaptureService : IDisposable
                         ? CaptureFeatures.ActionEffectCapture
                         : CaptureFeatures.None)
                     | CaptureFeatures.ActionNameSnapshot
-                    | CaptureFeatures.BarrierState,
+                    | CaptureFeatures.BarrierState
+                    | (this.DutyRun is null
+                        ? CaptureFeatures.None
+                        : CaptureFeatures.DutyRunIdentity),
                 CaptureId = Guid.NewGuid(),
                 StartedAtUtc = this.startedAtUtc,
                 EndedAtUtc = DateTimeOffset.UtcNow,
                 TerritoryType = this.TerritoryType,
                 MapId = this.MapId,
                 Instance = this.Instance,
+                CaptureMode = this.CaptureMode,
+                DutyRun = this.DutyRun,
                 Actors = this.Actors.ToArray(),
                 Frames = this.Frames.ToArray(),
                 Events = this.Events.ToArray(),

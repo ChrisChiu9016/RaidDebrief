@@ -17,6 +17,7 @@ namespace RaidDebrief.Plugin;
 internal enum ReplaySourceMode
 {
     RuntimeLastCompletedPull,
+    HistoryArchive,
     DeveloperTestFixture,
 }
 
@@ -364,6 +365,8 @@ internal sealed class ReplayWindow : Window, IDisposable
     private static readonly string EmptyStateIcon = FontAwesomeIcon.TimesCircle.ToIconString();
     private const float PartyHpTextGap = 10;
     private readonly CaptureService captureService;
+    private readonly PullHistoryStore pullHistoryStore;
+    private readonly Action openHistoryWindow;
     private readonly ISharedImmediateTexture targetCircleTexture;
     private readonly ISharedImmediateTexture omnidirectionalTargetRingTexture;
     private readonly BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog;
@@ -393,6 +396,7 @@ internal sealed class ReplayWindow : Window, IDisposable
     private string? activeSourceDetail;
     private long? activeRuntimeSourceGeneration;
     private long developerSourceGeneration;
+    private long historySourceGeneration;
     private ReplaySourceMode? failedLoadSourceMode;
     private long failedLoadSourceGeneration;
     private Guid failedLoadCaptureId;
@@ -417,6 +421,8 @@ internal sealed class ReplayWindow : Window, IDisposable
 
     public ReplayWindow(
         CaptureService captureService,
+        PullHistoryStore pullHistoryStore,
+        Action openHistoryWindow,
         ITextureProvider textureProvider,
         IDataManager dataManager,
         BattleNpcOmnidirectionalityCatalog omnidirectionalityCatalog,
@@ -437,6 +443,10 @@ internal sealed class ReplayWindow : Window, IDisposable
             ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.captureService = captureService;
+        this.pullHistoryStore = pullHistoryStore
+            ?? throw new ArgumentNullException(nameof(pullHistoryStore));
+        this.openHistoryWindow = openHistoryWindow
+            ?? throw new ArgumentNullException(nameof(openHistoryWindow));
         this.omnidirectionalityCatalog = omnidirectionalityCatalog
             ?? throw new ArgumentNullException(nameof(omnidirectionalityCatalog));
         this.showHotEffects = showHotEffects;
@@ -676,6 +686,7 @@ internal sealed class ReplayWindow : Window, IDisposable
                 ImGui.EndTabItem();
             }
 
+
             if (ImGui.BeginTabItem("設定"))
             {
                 this.DrawSettingsTab();
@@ -698,6 +709,12 @@ internal sealed class ReplayWindow : Window, IDisposable
 
     private void DrawReplayTab(bool shouldAdvance)
     {
+        if (ImGui.Button("歷史紀錄"))
+        {
+            this.openHistoryWindow();
+        }
+
+        ImGui.Separator();
         if (shouldAdvance)
         {
             this.AdvancePlayback();
@@ -778,6 +795,7 @@ internal sealed class ReplayWindow : Window, IDisposable
 
         ImGui.EndChild();
     }
+
 
     private void DrawDeveloperTab()
     {
@@ -1035,6 +1053,7 @@ internal sealed class ReplayWindow : Window, IDisposable
                 completion.Mode,
                 completion.SourceGeneration,
                 completion.CaptureId);
+
             return;
         }
 
@@ -1066,6 +1085,11 @@ internal sealed class ReplayWindow : Window, IDisposable
         this.captureFeatureWarning = BuildCaptureFeatureWarning(this.session.Record);
         this.statusMessage =
             $"{completion.SuccessMessage} Replay 長度 {FormatTimestamp(this.session.DurationMilliseconds)}。";
+        if (completion.Mode == ReplaySourceMode.HistoryArchive)
+        {
+            this.selectReplayTabOnNextDraw = true;
+        }
+
         if (completion.Mode == ReplaySourceMode.RuntimeLastCompletedPull)
         {
             this.ApplyRequestedInitialSeek();
@@ -4390,6 +4414,47 @@ internal sealed class ReplayWindow : Window, IDisposable
             $"Developer/Test Capture ({path})",
             $"已載入 Developer/Test Capture：{path}。");
     }
+    internal HistoryReplayState GetHistoryReplayState() =>
+        new(
+            this.activeSourceMode == ReplaySourceMode.HistoryArchive
+                ? this.session?.Record.CaptureId
+                : null,
+            this.loadCoordinator.PendingMode == ReplaySourceMode.HistoryArchive
+                ? this.loadCoordinator.PendingCaptureId
+                : null);
+
+
+    internal void OpenHistoryEntry(PullHistoryEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        this.StartHistoryLoad(entry);
+        this.IsOpen = true;
+        this.selectReplayTabOnNextDraw = true;
+        this.focusWindowOnNextDraw = true;
+    }
+
+    private void StartHistoryLoad(PullHistoryEntry entry)
+    {
+        this.requestedSourceMode = ReplaySourceMode.HistoryArchive;
+        this.requestedDebriefReplay = null;
+        this.requestedInitialSeekTimestamp = null;
+        this.activeSuggestedReplayWindow = null;
+        var sourceGeneration = ++this.historySourceGeneration;
+        this.statusMessage =
+            $"正在載入 {entry.DutyRunName} 的 Pull #{entry.PullOrdinalWithinDutyRun}…";
+        this.loadCoordinator.Start(
+            () => this.pullHistoryStore.Load(entry.CaptureId),
+            entry.CaptureId,
+            ReplaySourceMode.HistoryArchive,
+            sourceGeneration,
+            $"History {entry.DutyRunName} / Pull #{entry.PullOrdinalWithinDutyRun} ({entry.CaptureId:D})",
+            $"已載入 {entry.DutyRunName} 的 Pull #{entry.PullOrdinalWithinDutyRun}。");
+    }
+
+    internal static string FormatTimestamp(long timestampMilliseconds) =>
+        TimeSpan.FromMilliseconds(timestampMilliseconds).ToString(
+            @"mm\:ss\.fff",
+            CultureInfo.InvariantCulture);
 
     internal static RuntimeReplaySourceDecision ResolveRuntimeSource(
         ReplaySourceSnapshot snapshot)
@@ -5083,6 +5148,4 @@ internal sealed class ReplayWindow : Window, IDisposable
         _ => id.ToString(),
     };
 
-    private static string FormatTimestamp(long timestampMilliseconds) =>
-        TimeSpan.FromMilliseconds(timestampMilliseconds).ToString(@"mm\:ss\.fff", CultureInfo.InvariantCulture);
 }

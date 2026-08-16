@@ -27,6 +27,47 @@ public sealed class CaptureJsonTests
         Assert.Equal(source.Frames[2].Actors[0], loaded.Frames[2].Actors[0]);
         Assert.True(loaded.Frames[2].Actors[0].IsOmnidirectional);
     }
+
+    [Fact]
+    public void RoundTripPreservesAutomaticDutyRunIdentity()
+    {
+        var enteredAtUtc = DateTimeOffset.Parse("2026-08-16T07:43:26Z");
+        var source = CreateRecord([0]) with
+        {
+            Features = CaptureFeatures.Current | CaptureFeatures.DutyRunIdentity,
+            StartedAtUtc = enteredAtUtc.AddMinutes(1),
+            EndedAtUtc = enteredAtUtc.AddMinutes(2),
+            CaptureMode = CaptureMode.AutomaticPull,
+            DutyRun = new DutyPullIdentity
+            {
+                DutyRunId = Guid.Parse("7c00c888-adff-45a5-bca3-caa000dd3324"),
+                ContentFinderConditionId = 1_003,
+                DutyName = "AAC Heavyweight M4",
+                DutyRunName = "AAC Heavyweight M4 · 2026-08-16 15:43:26",
+                DutyEnteredAtUtc = enteredAtUtc,
+                PullOrdinalWithinDutyRun = 2,
+            },
+            EndReason = PullEndReason.DutyWiped,
+        };
+
+        var loaded = CaptureJson.Deserialize(CaptureJson.Serialize(source));
+
+        Assert.Equal(CaptureMode.AutomaticPull, loaded.CaptureMode);
+        Assert.Equal(source.DutyRun, loaded.DutyRun);
+        Assert.Equal(PullEndReason.DutyWiped, loaded.EndReason);
+    }
+
+    [Fact]
+    public void LegacyCaptureWithoutDutyRunIdentityRemainsLoadable()
+    {
+        var source = CreateRecord([0]);
+
+        var loaded = CaptureJson.Deserialize(CaptureJson.Serialize(source));
+
+        Assert.Null(loaded.CaptureMode);
+        Assert.Null(loaded.DutyRun);
+        Assert.Null(loaded.EndReason);
+    }
     [Fact]
     public void RoundTripPreservesRecordedActionNames()
     {

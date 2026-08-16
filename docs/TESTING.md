@@ -85,7 +85,7 @@ DeathSequence = [D2, H1]
 
 ### Layer B — Plugin Service Integration
 
-Target `RaidDebrief.Plugin` orchestration without a running game client. Use fake Dalamud service events but the real `CaptureService`, `AutomaticPullLifecycle`, `PullRecord`, validator, in-memory `LastCompletedPull`, and explicit Developer/Test compressed JSON exporter.
+Target `RaidDebrief.Plugin` orchestration without a running game client. Use fake Dalamud service events but the real `CaptureService`, `AutomaticPullLifecycle`, `DutyRunTracker`, `PullHistoryStore`, `PullRecord`, validator, in-memory `LastCompletedPull`, and compressed JSON writers.
 
 Required lifecycle contracts:
 - Wipe and duty completion finalize exactly once.
@@ -97,6 +97,12 @@ Required lifecycle contracts:
 - Manual mode still requires explicit start/stop, cannot change mode during a capture, and exports `.json.gz` only through the explicit Developer/Test flow.
 - Validation failure preserves the previous `LastCompletedPull`, returns the automatic lifecycle to Idle, and permits a later Pull. Compressed export failure must not remove an already validated `LastCompletedPull`.
 - Exporting the current `LastCompletedPull` returns false when none exists, round-trips the same Capture ID through `.json.gz`, preserves player anonymization, and does not prevent the next automatic Pull from recording while serialization remains pending.
+- Pulls from one uninterrupted Duty visit share `DutyRunId`, increment `PullOrdinalWithinDutyRun`, and use a group name formed from the localized Duty name plus entry time.
+- A new Duty entry, Plugin reload, or disconnect/reconnect boundary conservatively creates a new `DutyRunId`, including when `ContentFinderConditionId` is unchanged.
+- Only validated automatic Pulls with Duty Run identity enter History. Manual Developer captures are rejected by the History store.
+- History writes one atomic GZip per Pull, atomically updates its lightweight index, restores valid orphan Pulls, drops missing-file entries, rebuilds older index versions to backfill derived final Boss HP, and drains the single writer on disposal.
+- History snapshots group newest Duty Runs first and order each group's Pulls by descending ordinal. The independent History window replaces the embedded History tab, shows final Boss HP only for a unique final BattleNpc candidate, and selecting a Pull loads only that indexed GZip through the shared background Replay loader.
+- A History load error remains visible and must not replace an existing valid Replay session; a successful load identifies the selected Capture and opens the Replay presentation.
 
 ### Layer C — Synthetic Pulls
 Create deterministic artificial PullRecord files.
@@ -226,7 +232,7 @@ In a configured Dalamud development build:
 /rdb
 ```
 
-The main window opens the Replay tab by default and resolves the current in-memory `LastCompletedPull` on every open. The Settings tab owns automatic Pull capture, post-Wipe Debrief, combat auto-close, and the persisted “開發人員” switch. The Developer tab is absent by default; enabling that switch exposes live probe diagnostics, capture controls, an explicit button that saves the current validated `LastCompletedPull` as `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz` using its UTC start time, and the explicit Developer/Test JSON source for manual interface testing. Save and load filesystem access occurs only after the user invokes the corresponding Developer action; the resulting `ReplaySession` uses only finalized `PullRecord` domain data. A failed manual import must not replace the current valid session.
+The main window opens the Replay tab by default and resolves the current in-memory `LastCompletedPull` on every open. The Replay page's top-left `歷史紀錄` button opens an independent History window; there is no embedded History tab. The History window presents only Duty group headers and Pull tables, without a redundant summary header, explanatory copy, per-group Pull/Duty summary, selected-Capture footer, or “查看最新 Pull” action. It reads the lightweight History snapshot, groups Pulls by Duty visit, displays the final Boss HP percentage when the final frame has one unambiguous BattleNpc candidate, and loads a selected archive through the shared background Replay path. Automatic History never restores or replaces Runtime `LastCompletedPull`. The Settings tab owns automatic Pull capture, post-Wipe Debrief, combat auto-close, and the persisted “開發人員” switch. The Developer tab remains an explicit testing path for saving or loading manual fixtures; its files never enter automatic History, and a failed manual import must not replace the current valid Replay session.
 
 ## 4. Regression Test Data
 Store reusable fixtures under:
@@ -246,7 +252,7 @@ builds and runs the remaining suite; recorded-pull regressions must be run on a 
 Real recordings may contain player-identifying information. New captures must:
 - serialize every player-character name as a Pull-local `Player N` alias
 - retain NPC names for encounter analysis
-- contain no Content ID field
+- contain no player Content ID field; `ContentFinderConditionId` is permitted Duty metadata
 
 Historical captures created before anonymization must be reviewed before sharing. Never share a raw private-party recording.
 

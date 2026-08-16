@@ -39,8 +39,10 @@ Target summary concept:
 
 The exact visual design may change, but the information hierarchy should remain simple.
 
+The History window opens from the Replay page's top-left `歷史紀錄` button, groups validated automatic Pulls by one uninterrupted Duty visit, shows the newest visit and Pull first, and lets the player load a selected Pull into the same Replay presentation. Its table reports objective end-state data: Pull timing and the final Boss HP percentage when exactly one Boss candidate is identifiable; it shows `—` rather than guessing when no unique candidate exists.
+
 ## 4. MVP Features
-Runtime replay only needs the current active pull and the latest successfully completed pull. Persistent pull history is not an MVP requirement.
+Runtime replay still prioritizes the latest successfully completed Pull. The approved post-MVP History scope additionally persists validated automatic Pulls, groups them by Duty visit, and provides browsing and Replay selection; retention controls remain a later phase.
 
 ### 4.1 Combat Recording
 Record enough data to reconstruct the pull after it ends.

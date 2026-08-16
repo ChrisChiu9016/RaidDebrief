@@ -773,7 +773,7 @@ internal sealed class ReplayWindow : Window, IDisposable
                 }
             }
 
-            ImGui.TextDisabled("啟用後顯示開發者分頁、即時診斷與手動 JSON 載入工具。");
+            ImGui.TextDisabled("啟用後顯示開發者分頁、即時診斷與手動 Capture 載入工具。");
         }
 
         ImGui.EndChild();
@@ -1162,11 +1162,11 @@ internal sealed class ReplayWindow : Window, IDisposable
             this.RequestRuntimeSource();
         }
 
-        ImGui.TextDisabled("手動 JSON 匯入僅供開發測試，不是正式 Replay 資料來源。");
+        ImGui.TextDisabled("手動 .json／.json.gz 匯入僅供開發測試，不是正式 Replay 資料來源。");
         ImGui.SetNextItemWidth(-100);
         ImGui.InputText("##ReplayFixturePath", ref this.fixturePath, 1_024);
         ImGui.SameLine();
-        if (ImGui.Button("載入 JSON"))
+        if (ImGui.Button("載入 Capture"))
         {
             this.StartDeveloperFixtureLoad();
         }
@@ -3711,9 +3711,9 @@ internal sealed class ReplayWindow : Window, IDisposable
 
         ImGui.Separator();
         ImGui.PushStyleColor(ImGuiCol.Text, SectionHeaderColor);
-        ImGui.TextUnformatted("DEATH QUICK JUMP");
+        ImGui.TextUnformatted("死亡快速跳轉");
         ImGui.PopStyleColor();
-        const string guidance = "Click a cluster to choose the exact player and timestamp";
+        const string guidance = "點選群組，以選擇特定玩家與時間點。";
         var guidanceWidth = ImGui.CalcTextSize(guidance).X;
         ImGui.SameLine();
         var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
@@ -3895,7 +3895,7 @@ internal sealed class ReplayWindow : Window, IDisposable
     {
         if (presentation.Deaths.Length == 0)
         {
-            ImGui.TextDisabled("No recorded party deaths.");
+            ImGui.TextDisabled("目前沒有隊伍成員的死亡紀錄。");
             return;
         }
 
@@ -4387,8 +4387,8 @@ internal sealed class ReplayWindow : Window, IDisposable
             Guid.Empty,
             ReplaySourceMode.DeveloperTestFixture,
             sourceGeneration,
-            $"Developer/Test JSON Fixture ({path})",
-            $"已載入 Developer/Test JSON Fixture：{path}。");
+            $"Developer/Test Capture ({path})",
+            $"已載入 Developer/Test Capture：{path}。");
     }
 
     internal static RuntimeReplaySourceDecision ResolveRuntimeSource(
@@ -4436,7 +4436,7 @@ internal sealed class ReplayWindow : Window, IDisposable
                 snapshot.FinalizationGeneration,
                 null,
                 null,
-                "Runtime 目前沒有 in-memory completed Pull；不會自動從 disk 恢復。");
+                "目前沒有已擷取的紀錄。");
         }
 
         return new RuntimeReplaySourceDecision(

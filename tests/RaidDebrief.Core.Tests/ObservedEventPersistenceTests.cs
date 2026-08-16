@@ -41,8 +41,8 @@ public sealed class ObservedEventPersistenceTests
         var json = CaptureJson.Serialize(record);
         var loaded = CaptureJson.Deserialize(json);
 
-        Assert.Contains("\"type\": \"castStarted\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"source\": \"dutyState\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"castStarted\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"source\":\"dutyState\"", json, StringComparison.Ordinal);
         Assert.Equal(record.Events, loaded.Events);
     }
 

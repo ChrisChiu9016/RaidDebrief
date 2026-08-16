@@ -67,7 +67,7 @@ public sealed class ReplayPreviousPullLoadingTests
 
         Assert.Equal(RuntimeReplaySourceDecisionKind.Empty, decision.Kind);
         Assert.Null(decision.Record);
-        Assert.Contains("不會自動從 disk 恢復", decision.Message, StringComparison.Ordinal);
+        Assert.Equal("目前沒有已擷取的紀錄。", decision.Message);
     }
 
     [Theory]

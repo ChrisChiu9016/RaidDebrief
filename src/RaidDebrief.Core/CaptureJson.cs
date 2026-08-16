@@ -1,4 +1,4 @@
-using System.Text;
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -8,7 +8,7 @@ public static class CaptureJson
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true,
+        WriteIndented = false,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
@@ -22,17 +22,25 @@ public static class CaptureJson
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
 
-        PullRecord record;
+        PullRecord? record;
         try
         {
-            record = JsonSerializer.Deserialize<PullRecord>(json, SerializerOptions)
-                ?? throw new InvalidDataException("Capture JSON did not contain a pull record.");
+            record = JsonSerializer.Deserialize<PullRecord>(json, SerializerOptions);
         }
         catch (JsonException exception)
         {
             throw new InvalidDataException("Capture JSON is invalid.", exception);
         }
 
+        return CompleteDeserialization(record);
+    }
+
+    private static PullRecord CompleteDeserialization(PullRecord? record)
+    {
+        if (record is null)
+        {
+            throw new InvalidDataException("Capture JSON did not contain a pull record.");
+        }
         record = UpgradeLegacyTargetMarkerOrder(record);
         PullRecordValidator.Validate(record);
         return record;
@@ -91,15 +99,15 @@ public static class CaptureJson
     public static void Save(string path, PullRecord record)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        WriteAtomic(path, Serialize(record), overwrite: true);
-    }
+        ArgumentNullException.ThrowIfNull(record);
+        if (!path.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "Compressed Capture paths must end with .json.gz.",
+                nameof(path));
+        }
 
-
-    internal static void WriteAtomic(string path, string content, bool overwrite)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentNullException.ThrowIfNull(content);
-
+        PullRecordValidator.Validate(record);
         var fullPath = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(fullPath)
             ?? throw new InvalidOperationException("Capture path has no parent directory.");
@@ -108,8 +116,20 @@ public static class CaptureJson
         Directory.CreateDirectory(directory);
         try
         {
-            File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
-            File.Move(temporaryPath, fullPath, overwrite);
+            using (var output = new FileStream(
+                temporaryPath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.None))
+            using (var compressed = new GZipStream(
+                output,
+                CompressionLevel.Optimal,
+                leaveOpen: false))
+            {
+                JsonSerializer.Serialize(compressed, record, SerializerOptions);
+            }
+
+            File.Move(temporaryPath, fullPath, overwrite: true);
         }
         finally
         {
@@ -123,7 +143,46 @@ public static class CaptureJson
     public static PullRecord Load(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        return Deserialize(File.ReadAllText(path, Encoding.UTF8));
+        var fullPath = Path.GetFullPath(path);
+        if (path.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            using var input = File.OpenRead(fullPath);
+            using var compressed = new GZipStream(input, CompressionMode.Decompress);
+            return Deserialize(compressed, compressed: true);
+        }
+
+        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "Capture paths must end with .json or .json.gz.",
+                nameof(path));
+        }
+
+        using var json = File.OpenRead(fullPath);
+        return Deserialize(json, compressed: false);
+    }
+
+    private static PullRecord Deserialize(Stream json, bool compressed)
+    {
+        PullRecord? record;
+        try
+        {
+            record = JsonSerializer.Deserialize<PullRecord>(json, SerializerOptions);
+            if (compressed)
+            {
+                json.CopyTo(Stream.Null);
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Capture JSON is invalid.", exception);
+        }
+        catch (InvalidDataException exception) when (compressed)
+        {
+            throw new InvalidDataException("Capture GZip data is invalid.", exception);
+        }
+
+        return CompleteDeserialization(record);
     }
 }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Objects.Enums;
@@ -32,6 +33,7 @@ internal sealed class CaptureService : IDisposable
     private PullEndReason? lastCompletedEndReason;
     private DebriefSummary? lastCompletedDebrief;
     private Task? backgroundTask;
+    private Task? developerExportTask;
     private long finalizationGeneration;
     private ReplaySourceFinalizationState replaySourceFinalizationState;
     private Guid? replaySourceFinalizationCaptureId;
@@ -74,6 +76,7 @@ internal sealed class CaptureService : IDisposable
     private string? lastWaymarkError;
     private string? lastTargetMarkerError;
     private string? lastExportPath;
+    private string? lastExportError;
     private WaymarkState[] latestWaymarks = [];
 
     public CaptureService(
@@ -121,6 +124,7 @@ internal sealed class CaptureService : IDisposable
                 return new CaptureStatus(
                     this.activeCapture is not null,
                     this.backgroundTask is { IsCompleted: false },
+                    this.developerExportTask is { IsCompleted: false },
                     this.automaticCaptureEnabled,
                     this.isInDutyInstance,
                     this.automaticLifecycle.IsArmedForCombatStart,
@@ -154,6 +158,7 @@ internal sealed class CaptureService : IDisposable
                     this.lastSerializationMilliseconds,
                     this.developerExportDirectory,
                     this.lastExportPath,
+                    this.lastExportError,
                     this.statusMessage);
             }
         }
@@ -259,9 +264,34 @@ internal sealed class CaptureService : IDisposable
             this.BeginFinalize(
                 isAutomatic: false,
                 exportJson: true,
-                "手動擷取已停止；正在驗證並背景匯出 JSON。");
+                "手動擷取已停止；正在驗證並背景匯出壓縮 JSON。");
             return true;
         }
+    }
+
+    public bool ExportLastCompletedPull()
+    {
+        PullRecord record;
+        lock (this.gate)
+        {
+            this.ThrowIfDisposed();
+            if (this.lastCompletedPull is not { } lastCompletedPull
+                || this.backgroundTask is { IsCompleted: false }
+                || this.developerExportTask is { IsCompleted: false })
+            {
+                return false;
+            }
+
+            record = lastCompletedPull;
+            this.lastExportError = null;
+            this.developerExportTask = Task.Run(
+                () => this.ExportCaptureToDeveloperDirectory(
+                    record,
+                    "Runtime LastCompletedPull",
+                    updateStatusMessage: false));
+        }
+
+        return true;
     }
 
     public FrameworkCaptureDecision BeginFrameworkUpdate(
@@ -692,6 +722,7 @@ internal sealed class CaptureService : IDisposable
     public void Dispose()
     {
         Task? task;
+        Task? exportTask;
         PullRecord? pendingRecord = null;
         var pendingRecordIsAutomatic = false;
         PullEndReason? pendingCompletedEndReason = null;
@@ -729,6 +760,7 @@ internal sealed class CaptureService : IDisposable
             }
 
             task = this.backgroundTask;
+            exportTask = this.developerExportTask;
         }
 
         this.dutyState.DutyStarted -= this.OnDutyStarted;
@@ -737,6 +769,7 @@ internal sealed class CaptureService : IDisposable
         this.dutyState.DutyCompleted -= this.OnDutyCompleted;
 
         task?.GetAwaiter().GetResult();
+        exportTask?.GetAwaiter().GetResult();
         if (pendingRecord is not null)
         {
             this.log.Information(
@@ -826,10 +859,24 @@ internal sealed class CaptureService : IDisposable
             return;
         }
 
+        this.ExportCaptureToDeveloperDirectory(
+            record,
+            "manual",
+            updateStatusMessage: true);
+    }
+
+    private void ExportCaptureToDeveloperDirectory(
+        PullRecord record,
+        string source,
+        bool updateStatusMessage)
+    {
         var startedAt = Stopwatch.GetTimestamp();
+        var captureStartedAtUtc = record.StartedAtUtc.UtcDateTime.ToString(
+            "yyyy-MM-dd'T'HH-mm-ss",
+            CultureInfo.InvariantCulture);
         var exportPath = Path.Combine(
             this.developerExportDirectory,
-            $"{record.CaptureId:D}.json");
+            $"{captureStartedAtUtc}_{record.CaptureId:D}.json.gz");
         try
         {
             this.exportCapture(exportPath, record);
@@ -838,11 +885,16 @@ internal sealed class CaptureService : IDisposable
             {
                 this.lastSerializationMilliseconds = serializationMilliseconds;
                 this.lastExportPath = exportPath;
-                this.statusMessage =
-                    $"Pull 已完成並通過驗證；Developer/Test JSON 已匯出至 {exportPath}。";
+                this.lastExportError = null;
+                if (updateStatusMessage)
+                {
+                    this.statusMessage =
+                        $"Pull 已完成並通過驗證；Developer/Test 壓縮 JSON 已匯出至 {exportPath}。";
+                }
             }
             this.log.Information(
-                "Raid Debrief manual capture {CaptureId} exported to {ExportPath} in {SerializationMilliseconds:F2} ms.",
+                "Raid Debrief {Source} capture {CaptureId} exported to {ExportPath} in {SerializationMilliseconds:F2} ms.",
+                source,
                 record.CaptureId,
                 exportPath,
                 serializationMilliseconds);
@@ -851,12 +903,17 @@ internal sealed class CaptureService : IDisposable
         {
             lock (this.gate)
             {
-                this.statusMessage =
-                    $"Pull 已保留在 LastCompletedPull，但 Developer/Test JSON 匯出失敗：{exception.Message}";
+                this.lastExportError = exception.Message;
+                if (updateStatusMessage)
+                {
+                    this.statusMessage =
+                        $"Pull 已保留在 LastCompletedPull，但 Developer/Test JSON 匯出失敗：{exception.Message}";
+                }
             }
             this.log.Error(
                 exception,
-                "Raid Debrief manual capture {CaptureId} developer JSON export failed.",
+                "Raid Debrief {Source} capture {CaptureId} developer JSON export failed.",
+                source,
                 record.CaptureId);
         }
     }
@@ -1559,6 +1616,7 @@ internal readonly record struct FrameRecordResult(
 internal readonly record struct CaptureStatus(
     bool IsRecording,
     bool IsBusy,
+    bool IsDeveloperExportBusy,
     bool AutomaticCaptureEnabled,
     bool IsInDutyInstance,
     bool IsArmedForCombatStart,
@@ -1592,4 +1650,5 @@ internal readonly record struct CaptureStatus(
     double? LastSerializationMilliseconds,
     string DeveloperExportDirectory,
     string? LastExportPath,
+    string? LastExportError,
     string Message);

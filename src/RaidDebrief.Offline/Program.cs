@@ -92,7 +92,7 @@ internal sealed record OfflineHostOptions(
         return new OfflineHostOptions(Path.GetFullPath(fixturePath), url, verify, seekIterations);
     }
     private const string Usage =
-        "Usage: RaidDebrief.Offline --fixture <PullRecord.json> " +
+        "Usage: RaidDebrief.Offline --fixture <PullRecord.json|PullRecord.json.gz> " +
         "[--url http://127.0.0.1:5198] [--verify] [--seek-iterations 20000]";
 }
 

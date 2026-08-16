@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.IO.Compression;
+using System.Text;
 using System.Numerics;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.DutyState;
@@ -501,6 +504,132 @@ public sealed class CaptureServiceLifecycleTests
     }
 
     [Fact]
+    public void ExportLastCompletedPullReturnsFalseWithoutCompletedPull()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var service = CreateService(exportDirectory, new FakeDutyState());
+        try
+        {
+            Assert.False(service.ExportLastCompletedPull());
+            Assert.False(Directory.Exists(exportDirectory));
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
+    public void ExportLastCompletedPullWritesAutomaticPullWithoutBlockingNextCapture()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        using var exportStarted = new ManualResetEventSlim();
+        using var allowExport = new ManualResetEventSlim();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            exportCapture: (path, record) =>
+            {
+                exportStarted.Set();
+                allowExport.Wait();
+                CaptureJson.Save(path, record);
+            });
+        try
+        {
+            service.RecordFrameworkSnapshot([], [], false, 97, 98, 0);
+            service.RecordFrameworkSnapshot(
+                [CreateActor("First Player", 1_101)],
+                [],
+                true,
+                97,
+                98,
+                0);
+            dutyState.Raise(ObservedEventType.DutyWiped);
+            var first = WaitForCompleted(service, expectedCompletedPullCount: 1);
+            Assert.False(Directory.Exists(exportDirectory));
+
+            Assert.True(service.ExportLastCompletedPull());
+            Assert.True(exportStarted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(service.Status.IsDeveloperExportBusy);
+
+            service.RecordFrameworkSnapshot([], [], false, 97, 98, 0);
+            service.RecordFrameworkSnapshot(
+                [CreateActor("Second Player", 1_102)],
+                [],
+                true,
+                97,
+                98,
+                0);
+            Assert.True(service.IsRecording);
+
+            allowExport.Set();
+            WaitForDeveloperExport(service);
+            var exportPath = Assert.IsType<string>(service.Status.LastExportPath);
+            Assert.Equal(ExpectedExportFileName(first), Path.GetFileName(exportPath));
+            var loaded = CaptureJson.Load(exportPath);
+            Assert.Equal(first.CaptureId, loaded.CaptureId);
+            Assert.Equal("Player 1", Assert.Single(loaded.Actors).Name);
+            Assert.Null(service.Status.LastExportError);
+        }
+        finally
+        {
+            allowExport.Set();
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task DisposeWaitsForPendingLastCompletedPullExportBeforeReturning()
+    {
+        var exportDirectory = CreateExportDirectory();
+        var dutyState = new FakeDutyState();
+        using var exportStarted = new ManualResetEventSlim();
+        using var allowExport = new ManualResetEventSlim();
+        var service = CreateService(
+            exportDirectory,
+            dutyState,
+            exportCapture: (path, record) =>
+            {
+                exportStarted.Set();
+                allowExport.Wait();
+                CaptureJson.Save(path, record);
+            });
+        try
+        {
+            service.RecordFrameworkSnapshot([], [], false, 99, 100, 0);
+            service.RecordFrameworkSnapshot(
+                [CreateActor("Player", 1_201)],
+                [],
+                true,
+                99,
+                100,
+                0);
+            dutyState.Raise(ObservedEventType.DutyWiped);
+            WaitForCompleted(service, expectedCompletedPullCount: 1);
+
+            Assert.True(service.ExportLastCompletedPull());
+            Assert.True(exportStarted.Wait(TimeSpan.FromSeconds(5)));
+
+            var disposeTask = Task.Run(service.Dispose);
+            await Task.Delay(100);
+            Assert.False(disposeTask.IsCompleted);
+
+            allowExport.Set();
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(File.Exists(service.Status.LastExportPath));
+        }
+        finally
+        {
+            allowExport.Set();
+            service.Dispose();
+            DeleteExportDirectory(exportDirectory);
+        }
+    }
+
+    [Fact]
     public void ValidationFailurePreservesPreviousLastCompletedPull()
     {
         var exportDirectory = CreateExportDirectory();
@@ -555,7 +684,7 @@ public sealed class CaptureServiceLifecycleTests
     }
 
     [Fact]
-    public void DeveloperJsonExportAnonymizesPlayersAndLoadsOffline()
+    public void DeveloperCompressedJsonExportAnonymizesPlayersAndLoadsOffline()
     {
         var exportDirectory = CreateExportDirectory();
         var dutyState = new FakeDutyState();
@@ -583,9 +712,10 @@ public sealed class CaptureServiceLifecycleTests
                 actor => Assert.Equal("Raid Boss", actor.Name));
 
             var exportPath = Assert.IsType<string>(service.Status.LastExportPath);
+            Assert.Equal(ExpectedExportFileName(record), Path.GetFileName(exportPath));
             var loaded = CaptureJson.Load(exportPath);
             Assert.Equal(record.CaptureId, loaded.CaptureId);
-            var json = File.ReadAllText(exportPath);
+            var json = ReadCompressedJson(exportPath);
             Assert.DoesNotContain("Alice Example", json, StringComparison.Ordinal);
             Assert.DoesNotContain("Bob Example", json, StringComparison.Ordinal);
             Assert.DoesNotContain("contentId", json, StringComparison.OrdinalIgnoreCase);
@@ -1069,6 +1199,14 @@ public sealed class CaptureServiceLifecycleTests
         Assert.True(completed, "Capture background work did not finish within five seconds.");
     }
 
+    private static void WaitForDeveloperExport(CaptureService service)
+    {
+        var completed = SpinWait.SpinUntil(
+            () => !service.Status.IsDeveloperExportBusy,
+            TimeSpan.FromSeconds(5));
+        Assert.True(completed, "LastCompletedPull export did not finish within five seconds.");
+    }
+
     private static PullRecord WaitForCompleted(
         CaptureService service,
         long expectedCompletedPullCount)
@@ -1146,11 +1284,25 @@ public sealed class CaptureServiceLifecycleTests
             ],
         };
 
+    private static string ExpectedExportFileName(PullRecord record) =>
+        $"{record.StartedAtUtc.UtcDateTime.ToString("yyyy-MM-dd'T'HH-mm-ss", CultureInfo.InvariantCulture)}_{record.CaptureId:D}.json.gz";
+
     private static string CreateExportDirectory() =>
         Path.Combine(
             Path.GetTempPath(),
             "RaidDebrief.Plugin.Tests",
             Guid.NewGuid().ToString("N"));
+
+    private static string ReadCompressedJson(string path)
+    {
+        using var input = File.OpenRead(path);
+        using var compressed = new GZipStream(input, CompressionMode.Decompress);
+        using var reader = new StreamReader(
+            compressed,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            detectEncodingFromByteOrderMarks: false);
+        return reader.ReadToEnd();
+    }
 
     private static void DeleteExportDirectory(string exportDirectory)
     {

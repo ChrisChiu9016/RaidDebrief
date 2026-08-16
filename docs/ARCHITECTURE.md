@@ -15,7 +15,7 @@ ActivePull
       ▼
 Finalized PullRecord
       │
-      ├──────────────► Dev/Test JSON Export
+      ├──────────────► Dev/Test compressed JSON export
       │
       ▼
 LastCompletedPull
@@ -39,7 +39,7 @@ src/
 │  ├─ Dalamud services
 │  ├─ Combat capture
 │  ├─ Game-thread adapters
-│  └─ Developer/test JSON export
+│  └─ Developer/test compressed JSON export
 │
 ├─ RaidDebrief.Core/
 │  ├─ Domain models
@@ -125,17 +125,19 @@ ReplaySourceSnapshot
 └─ CompletedGeneration / LastCompletedPull
 
 Development / Testing:
-PullRecord ↔ JSON fixture
+PullRecord ↔ compact JSON + GZip (`.json.gz`) or legacy JSON (`.json`) fixture
 ```
 
 - Runtime does not use disk to determine the last Pull. The atomic Replay source snapshot replaces its `LastCompletedPull` reference in memory only after successful finalization and validation.
 - Plugin startup or reload does not restore the previous session's last Pull. It may initialize with `ActivePull = null` and `LastCompletedPull = null`.
 - Runtime requires no `capture-index.json`, persistent latest-Pull lookup, sequence ordering, startup scan of historical Pulls, or cross-session combat-history recovery.
-- JSON output is an explicit developer/test export of a finalized `PullRecord`, using the existing export flow's selected path or a normal fixture path such as `testdata/real-pull-001.json`.
+- New explicit developer/test exports store compact, named, UTF-8 JSON inside a GZip container at `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz`, using the Pull's UTC start time; legacy and repository fixtures remain loadable as plain `.json`.
+- The Developer tab can explicitly export the current validated in-memory `LastCompletedPull` to the same `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz` format. This snapshots the immutable record reference under the Capture lock and serializes it on a separate tracked background task, so it does not block the next Pull from starting; plugin disposal drains the task before returning.
+- Re-exporting the same `LastCompletedPull` atomically replaces the file for that Capture ID. It does not create history, an index, retention, or automatic runtime restoration.
 - There is no special “Latest Pull JSON” file and no runtime dependency on `last-capture.json` or any replacement for it.
-- Real FFXIV Pulls can be exported as fixtures; Offline Replay can load those fixtures; regression tests can reuse the same Pull; and JSON round-trip and validator tests remain supported.
+- Real FFXIV Pulls can be exported as compressed fixtures; Offline Replay can load compressed or legacy plain fixtures; regression tests can reuse the same Pull; and JSON round-trip and validator tests remain supported.
 
-JSON persistence is a development and testing facility, not a prerequisite for runtime replay.
+Compressed JSON persistence is a development and testing facility, not a prerequisite for runtime replay.
 
 ### Capture Privacy
 
@@ -248,14 +250,14 @@ Do not rely on a single transient object reference as the persisted identity.
 ## 7. Replay Engine
 Responsibilities:
 - Consume the atomic Runtime Replay source snapshot and construct Replay from its finalized `LastCompletedPull`.
-- Load a JSON `PullRecord` fixture only in explicit offline or manually selected Developer/Test flows.
+- Load a compressed `.json.gz` or legacy `.json` `PullRecord` fixture only in explicit offline or manually selected Developer/Test flows.
 - Resolve actor state for an arbitrary timestamp.
 - Interpolate position between samples when appropriate.
 - Expose current actor state to UI.
 - Expose event markers.
 - Support play/pause/scrub/jump.
 
-Replay Engine must work without Dalamud. Runtime Replay does not require a JSON file, repository lookup, or disk persistence.
+Replay Engine must work without Dalamud. Runtime Replay does not require a Capture file, repository lookup, or disk persistence.
 
 ### Replay input boundary
 
@@ -314,7 +316,7 @@ Runtime:      ReplaySourceSnapshot → PullRecord → Replay
 - `DebriefSummaryController` applies the existing per-generation post-Wipe lifecycle to the Summary: a generation finalized during combat is queued until the first out-of-combat UI update; every later Wipe is independent; combat entry dismisses a visible Summary; clear, manual, failed, disabled, or mismatched Pull／Summary pairs never appear. The persisted, default-enabled user setting retains the legacy JSON key `ShowWipeReplayPrompt` while its UI contract is cleanly renamed to “Wipe 後顯示 Debrief 摘要”. The window itself is player-facing, not diagnostic: the Capture ID moves to the header tooltip, the recorded Boss name accompanies its objective HP percentage, and each death presents its recorded Job through `ResolveDeathLabel`, falling back to the capture-time `Player N` alias only when the Job is unresolved. A single recorded death renders one row because the sequence would repeat it verbatim; two or more group through `ReplayWindow.IsWithinDeathCluster`, the one predicate Death Quick Jump also uses, so a clustered Wipe collapses into a Job-icon row plus the derived count title and timestamp range instead of a wrapped string of aliases. The window carries the Replay background alpha, centres on first appearance, scales its framed lengths by the UI scale, and marks the suggested-window Replay button as the default item.
 - `ReplayFramePolicy` is the allocation-free Draw boundary: a closed Replay never draws; any open Replay remains drawable, including a window intentionally kept visible in combat, but only visible out-of-combat playback may advance. Combat-entry hiding is performed separately by `ReplayCombatGate`. `ReplayWindow.UpdateUiState` pauses and cancels pending adoption after manual close or combat suspension.
 - `ReplayLoadCoordinator` owns request cancellation and disposal. Supersession, source invalidation, combat hiding, manual closing, or Plugin disposal cancels the old request and checks cancellation before and after record loading and session construction. A background task returns only a completion value; it never writes window state directly. Disposed windows reject new work and cannot adopt a later completion.
-- Formal Replay Draw uses the prebuilt presentation Death array and health-change index, and reconstructs bounded active-status rows into stack memory without materializing Timeline collections. Runtime Draw performs no JSON serialization, filesystem access, live actor traversal, complete-Timeline materialization, health-change collection, or new cache-layer lookup. Manual-source diagnostics, JSON import, and the live probe are isolated in the Developer tab; full probe refresh is enabled only while Developer mode is enabled and that tab is visible, and is disabled when another tab or the main window is hidden.
+- Formal Replay Draw uses the prebuilt presentation Death array and health-change index, and reconstructs bounded active-status rows into stack memory without materializing Timeline collections. Runtime Draw performs no JSON serialization, filesystem access, live actor traversal, complete-Timeline materialization, health-change collection, or new cache-layer lookup. Manual-source diagnostics, Capture import, and the live probe are isolated in the Developer tab; full probe refresh is enabled only while Developer is selected.
 - `ReplayStatusEffectDatabase` classifies the cached English Lumina Status descriptions once into recorded-effect categories. Target kind remains part of the filter: player buffs and Boss damage-down debuffs are not interchangeable, Haima／Panhaima display only their recorded reserve stacks, and healing-over-time effects are hidden by default through persisted configuration.
 
 
@@ -348,24 +350,21 @@ Background tasks consume only finalized managed `PullRecord` data. They never ac
 
 ## 10. Development and Testing Serialization
 
-JSON is not runtime state or a source of truth for the last completed Pull. Its development and testing uses are:
+Capture JSON is not runtime state or a source of truth for the last completed Pull. Its development and testing uses are:
 
 - Exporting a real FFXIV Pull as a reproducible fixture.
 - Loading a fixture into Offline Replay.
 - Reusing the same Pull in regression tests.
 - Exercising JSON round-trip and validator tests.
 
-Recommended fixture format:
-- Human-readable JSON first for debugging.
-- Version the schema from the beginning.
+Required export format:
+- Compact, named JSON using the existing camelCase schema.
+- UTF-8 without a byte-order mark.
+- GZip container with the `.json.gz` suffix.
+- Atomic temporary-file write followed by replacement only after the GZip footer is complete.
+- `CaptureJson.Load` retains read compatibility with legacy plain `.json` fixtures.
 
-Example:
-
-```text
-schemaVersion: 1
-```
-
-A compact binary format can be introduced later if file size or load time becomes a real problem.
+The GZip container does not change `schemaVersion`; schema versioning continues to describe the decompressed `PullRecord` JSON. Repository regression fixtures remain plain JSON so their reviewed byte length, SHA-256, and provenance stay unchanged.
 
 JSON persistence is a development and testing facility, not a prerequisite for runtime replay.
 

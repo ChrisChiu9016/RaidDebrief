@@ -46,8 +46,8 @@ public sealed class WaymarkTimelineTests
         var json = CaptureJson.Serialize(record);
         var loaded = CaptureJson.Deserialize(json);
 
-        Assert.Contains("\"id\": \"a\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"id\": \"four\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"a\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"four\"", json, StringComparison.Ordinal);
         Assert.Single(loaded.WaymarkFrames);
         Assert.Equal(record.WaymarkFrames[0].Waymarks, loaded.WaymarkFrames[0].Waymarks);
     }

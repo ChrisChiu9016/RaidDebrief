@@ -60,7 +60,7 @@ public sealed class ActionEffectRecordTests
         var json = CaptureJson.Serialize(source);
         var loaded = CaptureJson.Deserialize(json);
 
-        Assert.Contains("\"kind\": \"damage\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"kind\":\"damage\"", json, StringComparison.Ordinal);
         Assert.Single(loaded.ActionEffects);
         Assert.Equal(2, loaded.ActionEffects[0].Targets.Length);
         Assert.Equal(2, loaded.ActionEffects[0].Targets[0].Entries.Length);

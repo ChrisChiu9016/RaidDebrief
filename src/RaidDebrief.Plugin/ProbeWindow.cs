@@ -123,10 +123,30 @@ internal sealed class ProbeWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.TextColored(new Vector4(0.45f, 0.75f, 1f, 1f), "Capture（schemaVersion 1）");
         ImGui.Separator();
-        ImGui.TextUnformatted("隱私：JSON 內玩家名稱匿名化為 Player N；不擷取 Content ID。");
+        ImGui.TextUnformatted("隱私：壓縮 Capture 內玩家名稱匿名化為 Player N；不擷取 Content ID。");
         if (ImGui.Button("開啟上一個 Pull Replay"))
         {
             this.openReplay();
+        }
+
+        ImGui.SameLine();
+        var canExportLastPull =
+            status.LastCompletedCaptureId is not null
+            && !status.IsBusy
+            && !status.IsDeveloperExportBusy;
+        ImGui.BeginDisabled(!canExportLastPull);
+        if (ImGui.Button("將目前 Last Pull 儲存為 .json.gz"))
+        {
+            this.captureService.ExportLastCompletedPull();
+        }
+        ImGui.EndDisabled();
+        if (status.LastCompletedCaptureId is null)
+        {
+            ImGui.TextDisabled("目前沒有可匯出的 Last Pull。");
+        }
+        else if (status.IsDeveloperExportBusy)
+        {
+            ImGui.TextDisabled("正在背景儲存目前的 Last Pull…");
         }
 
         var automaticCaptureEnabled = status.AutomaticCaptureEnabled;
@@ -158,7 +178,7 @@ internal sealed class ProbeWindow : Window, IDisposable
         }
         else if (status.IsRecording)
         {
-            if (ImGui.Button("停止並匯出 JSON"))
+            if (ImGui.Button("停止並匯出 .json.gz"))
             {
                 this.captureService.StopAndExport();
             }
@@ -233,13 +253,17 @@ internal sealed class ProbeWindow : Window, IDisposable
 
         if (status.LastSerializationMilliseconds is { } serializationMilliseconds)
         {
-            ImGui.TextUnformatted($"JSON serialization：{serializationMilliseconds:F2} ms");
+            ImGui.TextUnformatted($"JSON + GZip export：{serializationMilliseconds:F2} ms");
         }
 
-        ImGui.TextWrapped($"Developer/Test JSON 匯出目錄：{status.DeveloperExportDirectory}");
+        ImGui.TextWrapped($"Developer/Test Capture 匯出目錄：{status.DeveloperExportDirectory}");
         if (status.LastExportPath is not null)
         {
             ImGui.TextWrapped($"最後匯出：{status.LastExportPath}");
+        }
+        if (status.LastExportError is not null)
+        {
+            ImGui.TextWrapped($"最後匯出錯誤：{status.LastExportError}");
         }
 
         if (this.captureService.GetReplaySourceSnapshot().LastCompletedPull is { } lastCompletedPull)

@@ -1,3 +1,6 @@
+using System.IO.Compression;
+using System.Text;
+using System.Text.Json.Nodes;
 using RaidDebrief.Core;
 using Xunit;
 
@@ -13,7 +16,8 @@ public sealed class CaptureJsonTests
         var json = CaptureJson.Serialize(source);
         var loaded = CaptureJson.Deserialize(json);
 
-        Assert.Contains("\"schemaVersion\": 1", json, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\":1", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", json, StringComparison.Ordinal);
         Assert.Equal(CaptureSchema.CurrentVersion, loaded.SchemaVersion);
         Assert.Equal(CaptureFeatures.Current, loaded.Features);
         Assert.Single(loaded.Actors);
@@ -83,13 +87,10 @@ public sealed class CaptureJsonTests
     [Fact]
     public void LegacyJsonWithoutActionNamesLoadsAsEmpty()
     {
-        var json = CaptureJson.Serialize(CreateRecord([0]));
-        json = json.Replace(
-            "  \"actionNames\": [],\n",
-            string.Empty,
-            StringComparison.Ordinal);
+        var root = JsonNode.Parse(CaptureJson.Serialize(CreateRecord([0])))!.AsObject();
+        Assert.True(root.Remove("actionNames"));
 
-        var loaded = CaptureJson.Deserialize(json);
+        var loaded = CaptureJson.Deserialize(root.ToJsonString());
 
         Assert.Empty(loaded.ActionNames);
         Assert.Equal(CaptureFeatures.Current, loaded.Features);
@@ -136,18 +137,88 @@ public sealed class CaptureJsonTests
     }
 
     [Fact]
-    public void AtomicSaveCanBeLoadedOffline()
+    public void AtomicCompressedSaveContainsCompactUtf8JsonAndLoadsOffline()
     {
         var directory = Path.Combine(Path.GetTempPath(), "RaidDebrief.Core.Tests", Guid.NewGuid().ToString("N"));
-        var path = Path.Combine(directory, "offline-capture.json");
+        var path = Path.Combine(directory, "offline-capture.json.gz");
 
         try
         {
             CaptureJson.Save(path, CreateRecord([0, 101, 201]));
-            var loaded = CaptureJson.Load(path);
 
+            var bytes = File.ReadAllBytes(path);
+            Assert.True(bytes.Length >= 2);
+            Assert.Equal(0x1F, bytes[0]);
+            Assert.Equal(0x8B, bytes[1]);
+
+            var json = ReadCompressedJson(path);
+            Assert.StartsWith("{\"schemaVersion\":1", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("\n", json, StringComparison.Ordinal);
+
+            var loaded = CaptureJson.Load(path);
             Assert.Equal(3, loaded.Frames.Length);
             Assert.Equal(100.5, PullRecordMetrics.AverageSampleIntervalMilliseconds(loaded));
+            Assert.False(File.Exists(path + ".tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+    }
+
+    [Fact]
+    public void LegacyPlainJsonStillLoads()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "RaidDebrief.Core.Tests", Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "legacy-capture.json");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(
+                path,
+                CaptureJson.Serialize(CreateRecord([0, 101, 201])),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            var loaded = CaptureJson.Load(path);
+            Assert.Equal(3, loaded.Frames.Length);
+            Assert.Equal(100.5, PullRecordMetrics.AverageSampleIntervalMilliseconds(loaded));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveRequiresCompressedJsonExtension()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => CaptureJson.Save("capture.json", CreateRecord([0])));
+
+        Assert.Contains(".json.gz", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CorruptedCompressedCaptureIsRejected()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "RaidDebrief.Core.Tests", Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "corrupt.json.gz");
+
+        try
+        {
+            CaptureJson.Save(path, CreateRecord([0]));
+            var bytes = File.ReadAllBytes(path);
+            bytes[^8] ^= 0xFF;
+            File.WriteAllBytes(path, bytes);
+
+            Assert.Throws<InvalidDataException>(() => CaptureJson.Load(path));
         }
         finally
         {
@@ -247,6 +318,17 @@ public sealed class CaptureJsonTests
         var referencedAssemblies = typeof(PullRecord).Assembly.GetReferencedAssemblies();
 
         Assert.DoesNotContain(referencedAssemblies, assembly => assembly.Name?.Contains("Dalamud", StringComparison.Ordinal) == true);
+    }
+
+    private static string ReadCompressedJson(string path)
+    {
+        using var input = File.OpenRead(path);
+        using var compressed = new GZipStream(input, CompressionMode.Decompress);
+        using var reader = new StreamReader(
+            compressed,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            detectEncodingFromByteOrderMarks: false);
+        return reader.ReadToEnd();
     }
 
     private static PullRecord CreateRecord(long[] timestamps)

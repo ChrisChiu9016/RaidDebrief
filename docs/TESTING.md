@@ -20,6 +20,15 @@ Examples:
 - Schema migration/loading
 - Suggested replay-window calculation
 
+
+Required Capture serialization contracts:
+- `CaptureJson.Serialize` emits compact, named, camelCase JSON with no formatting newlines.
+- `CaptureJson.Save` writes UTF-8 JSON without a BOM directly through `GZipStream` to an atomic `.json.gz` temporary file.
+- The temporary file is replaced only after the GZip stream is disposed and its footer is complete.
+- `CaptureJson.Load` accepts new `.json.gz` exports and legacy plain `.json` fixtures.
+- Corrupt or truncated GZip data fails without returning a partial `PullRecord`; failed export never removes a validated in-memory `LastCompletedPull`.
+- Explicit `LastCompletedPull` export writes the already validated immutable record on a separate background task, does not block the next Capture, reports its path or error, and is drained during disposal.
+- Repository recorded fixtures remain byte-for-byte unchanged plain JSON.
 Required Replay contracts:
 - Construct Replay services directly from finalized `PullRecord` domain data. JSON and filesystem access belong only to Offline/Test loading before Replay construction.
 - Verify Position linear interpolation at sample start, midpoint, and end timestamps without extrapolating beyond the latest sample.
@@ -76,7 +85,7 @@ DeathSequence = [D2, H1]
 
 ### Layer B — Plugin Service Integration
 
-Target `RaidDebrief.Plugin` orchestration without a running game client. Use fake Dalamud service events but the real `CaptureService`, `AutomaticPullLifecycle`, `PullRecord`, validator, in-memory `LastCompletedPull`, and explicit Developer/Test JSON exporter.
+Target `RaidDebrief.Plugin` orchestration without a running game client. Use fake Dalamud service events but the real `CaptureService`, `AutomaticPullLifecycle`, `PullRecord`, validator, in-memory `LastCompletedPull`, and explicit Developer/Test compressed JSON exporter.
 
 Required lifecycle contracts:
 - Wipe and duty completion finalize exactly once.
@@ -85,8 +94,9 @@ Required lifecycle contracts:
 - Consecutive Pulls use distinct capture IDs and do not share actors, events, or Action Effects.
 - Player death and boss despawn/respawn events remain inside the same active Pull while `InCombat` stays true.
 - Disposal fully drains pending background finalization/export before returning, and a new service starts with no cross-session `LastCompletedPull` and waits for combat clear before recording again.
-- Manual mode still requires explicit start/stop, cannot change mode during a capture, and exports JSON only through the explicit Developer/Test flow.
-- Validation failure preserves the previous `LastCompletedPull`, returns the automatic lifecycle to Idle, and permits a later Pull. JSON export failure must not remove an already validated `LastCompletedPull`.
+- Manual mode still requires explicit start/stop, cannot change mode during a capture, and exports `.json.gz` only through the explicit Developer/Test flow.
+- Validation failure preserves the previous `LastCompletedPull`, returns the automatic lifecycle to Idle, and permits a later Pull. Compressed export failure must not remove an already validated `LastCompletedPull`.
+- Exporting the current `LastCompletedPull` returns false when none exists, round-trips the same Capture ID through `.json.gz`, preserves player anonymization, and does not prevent the next automatic Pull from recording while serialization remains pending.
 
 ### Layer C — Synthetic Pulls
 Create deterministic artificial PullRecord files.
@@ -185,12 +195,18 @@ dotnet build RaidDebrief.sln --no-restore --configuration Release -p:Platform=x6
 Never treat a successful test run, a Release build, or a recently modified DLL in another output directory as proof that the DLL loaded by Dalamud is current.
 
 ## 3. Developer Replay Mode
-Provide two explicit Developer/Test boundaries: the Offline executable and the manually selected JSON source inside the formal Phase 3 Replay window. Neither is persistent Pull history, and the formal Runtime source remains the in-memory `LastCompletedPull`.
+Provide two explicit Developer/Test boundaries: the Offline executable and the manually selected Capture source inside the formal Replay window. Neither is persistent Pull history, and the formal Runtime source remains the in-memory `LastCompletedPull`.
 
 Offline executable:
 
 ```powershell
 dotnet run --project src/RaidDebrief.Offline -- --fixture testdata/recorded/<CaptureId>.json
+```
+
+New compressed exports use the same host boundary:
+
+```powershell
+dotnet run --project src/RaidDebrief.Offline -- --fixture YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz
 ```
 
 Open the printed localhost URL to exercise Play／Pause／Scrub, event Timeline, arena state, and end-of-Pull behavior without FF14 or Dalamud.
@@ -210,7 +226,7 @@ In a configured Dalamud development build:
 /rdb
 ```
 
-The main window opens the Replay tab by default and resolves the current in-memory `LastCompletedPull` on every open. The Settings tab owns automatic Pull capture, post-Wipe Debrief, combat auto-close, and the persisted “開發人員” switch. The Developer tab is absent by default; enabling that switch exposes live probe diagnostics, capture controls, and the explicit Developer/Test JSON source for manual interface testing. JSON and filesystem access occur only after the user selects that tab and presses the load action; the resulting `ReplaySession` uses only finalized `PullRecord` domain data. A failed manual import must not replace the current valid session.
+The main window opens the Replay tab by default and resolves the current in-memory `LastCompletedPull` on every open. The Settings tab owns automatic Pull capture, post-Wipe Debrief, combat auto-close, and the persisted “開發人員” switch. The Developer tab is absent by default; enabling that switch exposes live probe diagnostics, capture controls, an explicit button that saves the current validated `LastCompletedPull` as `YYYY-MM-DDTHH-MM-SS_<CaptureId>.json.gz` using its UTC start time, and the explicit Developer/Test JSON source for manual interface testing. Save and load filesystem access occurs only after the user invokes the corresponding Developer action; the resulting `ReplaySession` uses only finalized `PullRecord` domain data. A failed manual import must not replace the current valid session.
 
 ## 4. Regression Test Data
 Store reusable fixtures under:
@@ -238,7 +254,7 @@ Historical captures created before anonymization must be reviewed before sharing
 Measure at minimum:
 - Capture cost per framework update
 - Memory usage during a 10–15 minute fight
-- Pull serialization time
+- Pull JSON serialization and GZip export time
 - Replay load time
 - Timeline scrubbing responsiveness
 
@@ -267,11 +283,11 @@ Before merging:
 1. Complete the x64 Debug build and hot-reload preflight above.
 2. Validate in game.
 3. Record at least one real pull.
-4. Inspect exported data when the scenario uses the explicit Developer/Test JSON flow.
+4. Inspect the decompressed JSON when the scenario uses the explicit Developer/Test `.json.gz` flow.
 5. Confirm no obvious missing/duplicated actors.
 6. Confirm timestamps are monotonic/coherent.
 7. Confirm the finalized in-memory `LastCompletedPull` is valid Replay input.
-8. If exported as a recorded fixture, confirm the fixture can also be loaded offline.
+8. Confirm the exported `.json.gz` can be loaded offline and a legacy `.json` fixture still loads unchanged.
 9. Confirm a current-build Pull records `BarrierState` and `ActionNameSnapshot`; inspect representative barrier percentages, at least one resolved static／runtime-RSV／UI-observed Action name when the encounter supplies it, and any unnamed Auto-attack-category Action Effect without accepting an `Action #ID` fallback.
 10. Confirm full scan count follows Capture／Probe demand rather than game FPS, first sample occurs on the combat-edge callback, average interval remains near 100 ms, and gap count does not create duplicate frames.
 11. Confirm rejected volatile Actor reads are counted and do not abort the remaining frame; investigate any repeated Actor slot failure or missing actor sequence.
